@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pdfplumber
+spacy
+en-core-web-sm
+faiss-cpu
+sentence-transformers
+torch
+scikit-learn
+numpy
+pydantic
