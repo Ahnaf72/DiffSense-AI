@@ -1,0 +1,277 @@
+# =============================================================================
+# DiffSense AI - Git Ignore File
+# This file tells Git which files/folders to NOT track
+# =============================================================================
+
+# =============================================================================
+# CRITICAL: Environment Variables & Secrets
+# NEVER upload passwords or API keys!
+# =============================================================================
+.env
+.env.local
+.env.production
+.env.development
+*.env
+# But DO track the example file
+!.env.example
+
+# =============================================================================
+# Python Files to Ignore
+# =============================================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-wheel-metadata/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# =============================================================================
+# Virtual Environments
+# =============================================================================
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+virtualenv/
+pyenv/
+
+# =============================================================================
+# IDE and Editor Files
+# =============================================================================
+# VS Code
+.vscode/
+*.code-workspace
+.history/
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+.idea_modules/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.swp
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# =============================================================================
+# Database Files
+# =============================================================================
+*.db
+*.sqlite
+*.sqlite3
+*.sql.bak
+database.db
+
+# MySQL dump files
+*.sql
+!database/migrations/*.sql  # But keep migration files
+!database/seeds/*.sql       # And seed files
+
+# =============================================================================
+# Uploaded Files & User Content
+# =============================================================================
+backend/uploads/documents/*
+!backend/uploads/documents/.gitkeep
+uploads/
+media/
+temp/
+tmp/
+
+# =============================================================================
+# Log Files
+# =============================================================================
+*.log
+logs/
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =============================================================================
+# Testing & Coverage
+# =============================================================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+test-results/
+
+# =============================================================================
+# AI/ML Model Files (too large for Git)
+# =============================================================================
+*.h5
+*.pkl
+*.pickle
+*.model
+*.bin
+*.pth
+*.pt
+*.onnx
+models/
+embeddings/
+*.faiss
+
+# =============================================================================
+# Documentation Build Files
+# =============================================================================
+docs/_build/
+docs/.doctrees/
+site/
+
+# =============================================================================
+# Package Manager Files
+# =============================================================================
+# Python
+Pipfile.lock
+
+# Node (if you add any JavaScript)
+node_modules/
+package-lock.json
+yarn.lock
+
+# =============================================================================
+# Jupyter Notebook
+# =============================================================================
+.ipynb_checkpoints/
+*.ipynb
+
+# =============================================================================
+# Flask/FastAPI Specific
+# =============================================================================
+instance/
+.webassets-cache
+.scrapy
+
+# Flask sessions
+flask_session/
+
+# FastAPI
+.fastapi_cache/
+
+# =============================================================================
+# Backup Files
+# =============================================================================
+*.bak
+*.backup
+*.old
+*.orig
+*.original
+*.tmp
+
+# =============================================================================
+# Compiled Files
+# =============================================================================
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# =============================================================================
+# Archive Files
+# =============================================================================
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# =============================================================================
+# OS Generated Files
+# =============================================================================
+.Spotlight-V100
+.Trashes
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# =============================================================================
+# Project Specific (DiffSense AI)
+# =============================================================================
+# Processed documents cache
+cache/
+*.cache
+
+# Temporary PDF/DOCX files
+*.pdf.tmp
+*.docx.tmp
+
+# User session files
+sessions/
+
+# Generated reports (contain sensitive data)
+reports/*.html
+reports/*.pdf
+!reports/.gitkeep
+
+# =============================================================================
+# KEEP these files (exceptions)
+# =============================================================================
+!.gitignore
+!.gitkeep
+!requirements.txt
+!README.md
+!LICENSE
