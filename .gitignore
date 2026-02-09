@@ -125,7 +125,7 @@ database.db
 # =============================================================================
 backend/uploads/documents/*
 !backend/uploads/documents/.gitkeep
-uploads/
+!backend/uploads/
 media/
 temp/
 tmp/
@@ -166,9 +166,10 @@ test-results/
 *.pth
 *.pt
 *.onnx
-models/
 embeddings/
 *.faiss
+# Keep models/ directory for source code, ignore only large files
+!models/
 
 # =============================================================================
 # Documentation Build Files
