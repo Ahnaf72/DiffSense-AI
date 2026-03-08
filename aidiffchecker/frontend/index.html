@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - AI Diff Checker</title>
+    <style>
+        .title {
+          position: absolute;
+          top: 20px;
+           right: 30px;
+         color: hotpink;
+           font-weight: bold;
+          }
+          
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #ffe4e6; /* light pink background */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        .login-container {
+            background: #fff0f6; /* soft pink */
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            text-align: center;
+            width: 300px;
+        }
+
+        h2 {
+            color: #d63384; /* hot pink */
+            margin-bottom: 25px;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border-radius: 10px;
+            border: 1px solid #d63384;
+            outline: none;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            border-radius: 10px;
+            border: none;
+            background: #d63384;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        button:hover {
+            background: #c61c6f;
+        }
+
+        .footer {
+            margin-top: 15px;
+            font-size: 0.9em;
+            color: #a8325c;
+        }
+    </style>
+</head>
+<body>
+    <h2 class="title">AI Diff Checker</h2>
+
+    <div class="login-container">
+        <h2>Login</h2>
+        <form id="loginForm">
+            <input type="text" id="username" placeholder="Username" required>
+            <input type="password" id="password" placeholder="Password" required>
+           
+            <select id="role">
+                <option value="admin">Admin</option>
+                <option value="teacher">Teacher</option>
+                <option value="student">Student</option>
+            </select>
+            <button type="submit">Login</button>
+        </form>
+        <div class="footer">AI Diff Checker</div>
+    </div>
+
+    <script>
+        const form = document.getElementById('loginForm');
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const role = document.getElementById('role').value;
+
+            const formData = new URLSearchParams();
+            formData.append("username", username);
+            formData.append("password", password);
+
+            try {
+                const response = await fetch("http://127.0.0.1:8000/token", {
+                    method: "POST",
+                    body: formData
+                });
+
+               if (!response.ok) throw new Error("Login failed");
+
+        const data = await response.json();
+        alert(`Logged in as ${role}! Token: ${data.access_token}`);
+
+        // Redirect based on role
+        if(role === "admin") window.location.href = "admin.html";
+        if(role === "teacher") window.location.href = "teacher.html";
+        if(role === "student") window.location.href = "student.html";
+
+    } catch (err) {
+        alert("Login failed. Check username/password.");
+    }
+        })
+     
+    </script>
+
+</body>
+</html>
