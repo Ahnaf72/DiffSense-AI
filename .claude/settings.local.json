@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python setup_offline.py:*)",
+      "Bash(pip install:*)",
+      "Bash(python -m pip install:*)",
+      "Bash(python:*)",
+      "Bash(docker:*)",
+      "Bash(where:*)",
+      "Bash(timeout /t 5 /nobreak)",
+      "Bash(set PYTHONPATH=D:DiffSense-AIDiffSense-AIaidiffchecker)",
+      "Bash(curl:*)"
+    ]
+  }
+}

@@ -1,10 +1,5 @@
-import mysql.connector
+from backend.admin_db import db as supabase_db
 
 def get_db():
-    db = mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="",  # add your MySQL password
-        database="ai_diff_checker"
-    )
-    return db
+    """Return the SupabaseDB instance (legacy helper)."""
+    return supabase_db

@@ -48,7 +48,7 @@ def _get_model_manager():
     """Get or create ModelManager instance (lazy import to avoid circular deps)."""
     global _model_manager
     if _model_manager is None:
-        from backend.model_manager import model_manager
+        from backend.core.model_manager import model_manager
         _model_manager = model_manager
     return _model_manager
 

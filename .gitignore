@@ -1,0 +1,62 @@
+# Environment files (contains secrets)
+.env
+.env.local
+.env.production
+env_backup.env
+
+# ML models (large files - downloaded at runtime)
+models/
+
+# Runtime data directories (uploads, caches, PDFs)
+data/
+aidiffchecker/backend/data/
+
+# Supabase CLI temp files
+supabase/.temp/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+
+# Test / cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Offline packages
+offline_packages/
+
+# Temp files
+*.tmp
+*.bak
+nul
+
+# Database files
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
