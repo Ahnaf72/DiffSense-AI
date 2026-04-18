@@ -57,6 +57,7 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 app.mount("/data",           StaticFiles(directory="data"), name="data")
 app.mount("/student_files",  StaticFiles(directory=config.STUDENT_ROOT), name="student_files")
 app.mount("/teacher_files",  StaticFiles(directory=config.TEACHER_ROOT), name="teacher_files")
+os.makedirs(os.path.join(FRONTEND_DIR, "assets"), exist_ok=True)
 app.mount("/assets",         StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="frontend_assets")
 
 # ── Frontend HTML routes ──────────────────────────────────────────────────

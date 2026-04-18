@@ -63,7 +63,8 @@ RUN mkdir -p \
     /app/backend/data/user_uploads \
     /app/backend/data/teacher_uploads \
     /app/backend/data/embed_cache_offline \
-    /app/backend/data/faiss_indexes
+    /app/backend/data/faiss_indexes \
+    /app/frontend/assets
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
