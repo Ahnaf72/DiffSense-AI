@@ -1,6 +1,7 @@
 # =============================================================================
 # DiffSense-AI Dockerfile
 # Multi-stage build for minimal image size with CPU-only PyTorch
+# Architecture: backend/ (db, services, routes, core), frontend/, data/
 # =============================================================================
 
 # ── Stage 1: Builder ─────────────────────────────────────────────────────────
@@ -18,9 +19,10 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Install Python dependencies
-COPY aidiffchecker/backend/requirements.txt /tmp/requirements.txt
+COPY backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir httpx && \
     pip install --no-cache-dir -r /tmp/requirements.txt
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
@@ -42,9 +44,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Set working directory
 WORKDIR /app
 
-# Copy application code
-COPY aidiffchecker/ /app/aidiffchecker/
-COPY setup_offline.py /app/
+# Copy layered backend application
+COPY backend/       /app/backend/
+COPY frontend/      /app/frontend/
+COPY run_server.py  /app/
 
 # Models will be downloaded at startup if ALLOW_MODEL_DOWNLOADS=true
 # For production, pre-bake models into the image by uncommenting:
@@ -53,19 +56,27 @@ COPY setup_offline.py /app/
 # Create required directories (including models dir for runtime download)
 RUN mkdir -p \
     /app/data/result_pdfs \
+    /app/data/user_uploads \
+    /app/data/teacher_uploads \
     /app/models \
-    /app/aidiffchecker/backend/data/reference_pdfs \
-    /app/aidiffchecker/backend/data/user_uploads \
-    /app/aidiffchecker/backend/data/teacher_uploads \
-    /app/aidiffchecker/backend/data/embed_cache_offline \
-    /app/aidiffchecker/backend/data/faiss_indexes
+    /app/backend/data/reference_pdfs \
+    /app/backend/data/user_uploads \
+    /app/backend/data/teacher_uploads \
+    /app/backend/data/embed_cache_offline \
+    /app/backend/data/faiss_indexes
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     MODEL_DIR=/app/models \
     OFFLINE_MODE=false \
-    ALLOW_MODEL_DOWNLOADS=true
+    ALLOW_MODEL_DOWNLOADS=true \
+    REFERENCE_DIR=/app/backend/data/reference_pdfs \
+    STUDENT_ROOT=/app/backend/data/user_uploads \
+    TEACHER_ROOT=/app/backend/data/teacher_uploads \
+    RESULT_ROOT=/app/data/result_pdfs \
+    EMBED_CACHE_DIR=/app/backend/data/embed_cache_offline \
+    FAISS_INDEX_DIR=/app/backend/data/faiss_indexes
 
 # Expose API port (Railway sets PORT env var automatically)
 EXPOSE 8000
@@ -75,4 +86,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/api/system/health || exit 1
 
 # Run the application (Railway provides PORT env var)
-CMD ["sh", "-c", "uvicorn aidiffchecker.backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8000}"]

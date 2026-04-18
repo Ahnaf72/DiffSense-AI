@@ -9,6 +9,9 @@ models/
 
 # Runtime data directories (uploads, caches, PDFs)
 data/
+backend/data/
+
+# Old structure data
 aidiffchecker/backend/data/
 
 # Supabase CLI temp files
@@ -33,6 +36,7 @@ build/
 *.swp
 *.swo
 .claude/
+.windsurf/
 
 # OS
 .DS_Store
@@ -60,3 +64,7 @@ nul
 
 # Logs
 *.log
+
+# Test scripts (local only)
+test_*.py
+test_*.ps1

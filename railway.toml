@@ -3,7 +3,7 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "uvicorn aidiffchecker.backend.main:app --host 0.0.0.0 --port $PORT"
+startCommand = "uvicorn backend.app:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/api/system/health"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
