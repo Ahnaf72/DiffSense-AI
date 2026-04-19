@@ -3,9 +3,16 @@ builder = "NIXPACKS"
 
 [build.env]
 NIXPACKS_PYTHON_VERSION = "3.14"
+HF_HUB_OFFLINE = "1"
+OFFLINE_MODE = "true"
+TRANSFORMERS_OFFLINE = "1"
 
 [deploy]
 startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
 
 [[services]]
 name = "backend"
