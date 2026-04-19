@@ -1,0 +1,29 @@
+# Web framework
+fastapi>=0.115
+uvicorn[standard]>=0.34
+
+# Database — Supabase (REST + CLI, no direct psycopg)
+sqlalchemy>=2.0
+httpx>=0.28
+
+# Config & validation
+pydantic>=2.10
+pydantic-settings>=2.7
+python-dotenv>=1.1
+
+# Auth & security
+python-jose[cryptography]>=3.4
+bcrypt>=4.0
+python-multipart>=0.0.20
+
+# Utilities
+tenacity>=9.0
+
+# Background jobs
+celery[redis]>=5.4
+
+# Embeddings
+sentence-transformers>=3.0
+
+# PDF processing
+PyMuPDF>=1.24
