@@ -1,0 +1,62 @@
+# =============================================================================
+# DiffSense-AI Python Dependencies
+# Pinned versions for reproducible offline deployment
+# =============================================================================
+
+# ── Core Framework ───────────────────────────────────────────────────────────
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.2
+
+# ── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+cryptography==41.0.7
+
+# ── Authentication ───────────────────────────────────────────────────────────
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+python-dotenv==1.0.0
+
+# ── PDF Processing ───────────────────────────────────────────────────────────
+pdfplumber==0.10.3
+PyMuPDF==1.23.8
+reportlab==4.0.7
+
+# ── Image Processing ─────────────────────────────────────────────────────────
+pillow==10.1.0
+opencv-python-headless==4.8.1.78
+pytesseract==0.3.10
+imagehash==4.3.1
+
+# ── ML/NLP (CPU-only) ────────────────────────────────────────────────────────
+# NOTE: Install torch separately with CPU-only wheel to reduce size:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch==2.1.1
+sentence-transformers==2.2.2
+fastembed==0.2.2
+faiss-cpu==1.7.4
+scikit-learn==1.3.2
+numpy==1.26.2
+rank-bm25==0.2.2
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+aiofiles==23.2.1
+colorama==0.4.6
+requests==2.31.0
+
+# =============================================================================
+# Installation Notes:
+#
+# For CPU-only PyTorch (recommended for offline/server deployment):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+#
+# For air-gap deployment, download wheels first:
+#   pip download -r requirements.txt -d ./offline_packages
+#   pip download torch --index-url https://download.pytorch.org/whl/cpu -d ./offline_packages
+#
+# Then install offline:
+#   pip install --no-index --find-links=./offline_packages -r requirements.txt
+# =============================================================================

@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <script src="assets/js/chart.min.js"></script>
+    <meta charset="UTF-8">
+    <title>Admin Dashboard</title>
+
+    <style>
+        /* Offline status badge */
+        .offline-badge {
+            position: fixed; top: 10px; right: 10px;
+            padding: 8px 16px; border-radius: 6px;
+            font-size: 12px; font-weight: 600; z-index: 9999; display: none;
+        }
+        .offline-badge.offline { background: #10b981; color: white; display: block; }
+        .offline-badge.degraded { background: #f59e0b; color: white; display: block; }
+        .degraded-banner {
+            background: #fef3c7; border-left: 4px solid #f59e0b;
+            padding: 12px 16px; margin: 16px; display: none;
+        }
+        .degraded-banner.active { display: block; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', sans-serif;
+
+        }
+
+        /* Layout */
+        body {
+            display: flex;
+            background: #fef2f2;
+            /* soft red background */
+            height: 100vh;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 240px;
+            background: #dc4126;
+            /* deep red */
+            color: white;
+            padding: 20px;
+        }
+
+        .sidebar h2 {
+            margin-bottom: 30px;
+            font-size: 20px;
+        }
+
+        .sidebar button {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 10px;
+            background: #fef2f2;
+            border: none;
+            color: black;
+            text-align: left;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: 0.3s;
+        }
+
+        .sidebar button:hover {
+            background: #991b1b;
+            color: white;
+        }
+
+        /* Main content */
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Topbar */
+        .topbar {
+            background: white;
+            padding: 15px 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+
+        .topbar h3 {
+            color: #7f1d1d;
+        }
+
+        /* Logout button */
+        .logout-btn {
+            background: #dc4126;
+            color: white;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        .logout-btn:hover {
+            background: #b91c1c;
+        }
+
+        /* Content */
+        .content {
+            padding: 30px;
+            overflow-y: auto;
+        }
+
+        /* Card style */
+        .card {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 5px 25px rgba(220, 38, 38, 0.1);
+            max-width: 500px;
+            border-top: 4px solid #dc2626;
+        }
+
+        .card h3 {
+            margin-bottom: 20px;
+            color: #7f1d1d;
+        }
+
+        /* Inputs */
+        input,
+        select {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            border: 1px solid #fecaca;
+        }
+
+        input:focus,
+        select:focus {
+            outline: none;
+            border-color: #dc2626;
+        }
+
+        /* Primary buttons */
+        .primary-btn {
+            background: #dc2626;
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        .primary-btn:hover {
+            background: #b91c1c;
+        }
+
+        .section {
+            display: none;
+        }
+
+        .stats {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            flex: 1;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.05);
+            border-left: 5px solid #dc2626;
+        }
+
+        .stat-card h4 {
+            color: #6b7280;
+            margin-bottom: 10px;
+        }
+
+        .stat-card p {
+            font-size: 22px;
+            font-weight: bold;
+            color: #7f1d1d;
+        }
+
+        .dropdown-section {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .mini-card {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        #teacherList li,
+        #studentList li,
+        #adminList li {
+            font-weight: normal;
+        }
+
+        #totalUsers {
+            font-size: 22px;
+            font-weight: bold;
+            color: #7f1d1d;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Offline status badge -->
+    <div id="offlineBadge" class="offline-badge">
+        <span id="badgeText">Checking...</span>
+    </div>
+    <div id="degradedBanner" class="degraded-banner">
+        <strong>System Running in Keyword-Only Mode</strong>
+        <p style="margin-top: 4px; font-size: 14px;">
+            Semantic and paraphrase detection unavailable. Only exact word matches will be detected.
+        </p>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <h2>👑 Admin Panel</h2>
+        <button onclick="showDashboard()">📊 Statistics</button>
+        <button onclick="showSection('addUser')">➕ Add User</button>
+        <button onclick="showSection('deleteUser')">❌ Delete User</button>
+        <button onclick="showSection('addPDF')">📚 Add PDFs</button>
+        <button onclick="showSection('deletePDF')">🗑 Delete PDFs</button>
+        <button onclick="showSection('changePass')">🔐 Change Password</button>
+    </div>
+
+    <!-- Main -->
+    <div class="main">
+
+        <div class="topbar">
+            <h3>Dashboard</h3>
+            <button class="logout-btn" onclick="logout()">Logout</button>
+        </div>
+
+        <div class="content">
+            <!-- ADD USER -->
+            <div id="addUser" class="section card" style="margin-top:20px;">
+                <h3>Add User</h3>
+                <input type="text" id="newUsername" placeholder="Username">
+                <input type="text" id="newFullName" placeholder="Full Name">
+                <input type="password" id="newPassword" placeholder="Password">
+                <select id="newRole">
+                    <option value="teacher">Teacher</option>
+                    <option value="student">Student</option>
+                    
+                </select>
+                <button class="primary-btn" onclick="addUser()">Create User</button>
+            </div>
+
+            <!-- DELETE USER -->
+            <div id="deleteUser" class="section card" style="margin-top:20px;">
+                <h3>Delete User</h3>
+
+                <input type="text" id="searchUser" placeholder="Search username..." onkeyup="filterUsers()">
+
+                <select id="userList" size="6"></select>
+                 <button class="primary-btn" onclick="deleteUser()">Delete User</button>
+            </div>
+
+            <!-- ADD PDF -->
+            <div id="addPDF" class="section card" style="margin-top:20px;">
+                <h3>Add Reference PDFs</h3>
+                <input type="file" id="pdfFiles" multiple>
+                <button class="primary-btn" onclick="uploadPDFs()">Upload PDFs</button>
+            </div>
+
+            <!-- DELETE PDF -->
+            <div id="deletePDF" class="section card" style="margin-top:20px;">
+                <h3>Delete Reference PDF</h3>
+
+                <input type="text" id="searchPdf" placeholder="Search PDF..." onkeyup="filterPDFs()">
+
+                <select id="pdfList"></select>
+                <button class="primary-btn" onclick="deletePDF()">Delete PDF</button>
+            </div>
+
+            <!-- CHANGE PASSWORD -->
+            <div id="changePass" class="section card" style="margin-top:20px;">
+                <h3>Change Password</h3>
+                <input type="password" id="currentPassword" placeholder="Current Password">
+                <input type="password" id="newPasswordChange" placeholder="New Password">
+                <input type="password" id="confirmPassword" placeholder="Confirm Password">
+                <button class="primary-btn" onclick="changePassword()">Update Password</button>
+            </div>
+
+            <!-- Stats Cards -->
+            <div class="stats">
+                <div class="card" onclick="toggleUsers()">
+                    <h3>Total Users</h3>
+                    <p id="totalUsers">0</p>
+                </div>
+
+
+                <div class="stat-card" onclick="toggleReferencePDFs()" style="cursor:pointer;">
+                    <h4>Reference PDFs</h4>
+                    <p id="referencePDFs">0</p>
+                </div>
+                <div class="stat-card">
+                    <h4>Teacher Uploads</h4>
+                    <p id="teacherUploads">0</p>
+                </div>
+                <div class="stat-card">
+                    <h4>Student Uploads</h4>
+                    <p id="studentUploads">0</p>
+                </div>
+            </div>
+            <div id="referenceDropdown" class="dropdown-section">
+
+                <div class="mini-card">
+                    <h4>Reference PDF List</h4>
+                    <ul id="referenceList"></ul>
+                </div>
+
+            </div>
+            <div id="usersDropdown" class="dropdown-section">
+
+                <div class="mini-card">
+                    <h4>Teachers</h4>
+                    <p id="teacherCount"></p>
+                    <ul id="teacherList"></ul>
+                </div>
+
+                <div class="mini-card">
+                    <h4>Students</h4>
+                    <p id="studentCount"></p>
+                    <ul id="studentList"></ul>
+                </div>
+
+                <div class="mini-card">
+                    <h4>Admin</h4>
+                    <p id="adminCount"></p>
+                    <ul id="adminList"></ul>
+                </div>
+            </div>
+
+
+
+            <!-- Chart -->
+            <div class="card">
+                <h3>Upload Comparison Chart</h3>
+                <canvas id="uploadChart"></canvas>
+            </div>
+
+            <!-- Uploaded Documents Overview -->
+            <div class="card" style="margin-top:20px;">
+                <h3>Uploaded Documents Overview</h3>
+                <p><strong>Teacher Files:</strong> <span id="teacherFiles">0</span></p>
+                <p><strong>Student Files:</strong> <span id="studentFiles">0</span></p>
+                <p><strong>Reference PDFs:</strong> <span id="refFiles">0</span></p>
+                <p><strong>Total Comparisons:</strong> <span id="totalComparisons">0</span></p>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        let allUsers = [];
+        let uploadChart = null;
+
+        function showSection(id) {
+            document.querySelectorAll(".section").forEach(sec => sec.style.display = "none");
+            document.getElementById(id).style.display = "block";
+        }
+        function showDashboard() {
+            // Show stats
+            document.querySelectorAll(".stats").forEach(el => {
+                el.style.display = "flex";
+            });
+
+            // Show only non-section cards (chart + overview)
+            document.querySelectorAll(".card").forEach(card => {
+                if (!card.classList.contains("section")) {
+                    card.style.display = "block";
+                }
+            });
+
+            // Hide all sections
+            document.querySelectorAll(".section").forEach(sec => {
+                sec.style.display = "none";
+            });
+        }
+
+        function logout() {
+            localStorage.removeItem("token");
+            window.location.href = "index.html";
+        }
+        async function loadDashboardStats() {
+            const token = localStorage.getItem("token");
+
+            const res = await fetch("http://127.0.0.1:8000/admin/dashboard-stats", {
+                headers: {
+                    "Authorization": "Bearer " + token
+                }
+            });
+
+            const data = await res.json();
+
+            // Update stats cards
+            document.getElementById("totalUsers").innerText = data.total_users;
+            document.getElementById("referencePDFs").innerText = data.reference_pdfs;
+            document.getElementById("teacherUploads").innerText = data.teacher_uploads;
+            document.getElementById("studentUploads").innerText = data.student_uploads;
+
+            // Overview card
+            document.getElementById("teacherFiles").innerText = data.teacher_uploads;
+            document.getElementById("studentFiles").innerText = data.student_uploads;
+            document.getElementById("refFiles").innerText = data.reference_pdfs;
+            document.getElementById("totalComparisons").innerText = data.comparisons;
+
+            // Chart
+            const ctx = document.getElementById("uploadChart").getContext("2d");
+
+            if (uploadChart) {
+                uploadChart.destroy();
+            }
+
+            uploadChart = new Chart(ctx, {
+                type: "bar",
+                data: {
+                    labels: ["Reference PDFs", "Teacher Uploads", "Student Uploads"],
+                    datasets: [{
+                        label: "Documents",
+                        data: [
+                            data.reference_pdfs,
+                            data.teacher_uploads,
+                            data.student_uploads
+                        ],
+                        backgroundColor: ["#f87171", "#ef4444", "#b91c1c"]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+        }
+
+        window.onload = function () {
+            loadDashboardStats();
+        }
+        function showSection(id) {
+            // Hide stats and chart
+            document.querySelectorAll(".stats, .card").forEach(el => {
+                el.style.display = "none";
+            });
+
+            // Hide all sections
+            document.querySelectorAll(".section").forEach(sec => {
+                sec.style.display = "none";
+            });
+
+            // Show selected section
+            document.getElementById(id).style.display = "block";
+        }
+
+        let allPDFs = [];
+
+        async function loadPDFs() {
+            const token = localStorage.getItem("token");
+            const res = await fetch("http://127.0.0.1:8000/admin/pdfs", {
+                headers: { "Authorization": "Bearer " + token }
+            });
+
+            const data = await res.json();
+            const list = document.getElementById("pdfList");
+            list.innerHTML = "";
+
+            data.forEach(pdf => {
+                const option = document.createElement("option");
+                option.value = pdf.name;
+                option.text = `${pdf.name} (on ${pdf.uploaded_at})`;
+                list.appendChild(option);
+            });
+        }
+
+        function filterPDFs() {
+            const value = document.getElementById("pdfSearch").value.toLowerCase();
+
+            const filtered = allPDFs.filter(pdf =>
+                pdf.name.toLowerCase().includes(value)
+            );
+
+            if (filtered.length === 0) {
+                document.getElementById("pdfResults").innerHTML =
+                    "<p>No matching document</p>";
+            } else {
+                renderPDFs(filtered);
+            }
+        }
+
+        function renderPDFs(list) {
+            document.getElementById("pdfResults").innerHTML =
+                list.map(pdf =>
+                    `<div>${pdf.name}</div>`
+                ).join("");
+        }
+        loadPDFs();
+        async function addUser() {
+            const username = document.getElementById("newUsername").value;
+            const full_name = document.getElementById("newFullName").value;
+            const password = document.getElementById("newPassword").value;
+            const role = document.getElementById("newRole").value;
+
+            const token = localStorage.getItem("token");
+            console.log("Token:", token);
+
+            const formData = new FormData();
+            formData.append("username", username);
+            formData.append("full_name", full_name);
+            formData.append("password", password);
+            formData.append("role", role);
+
+            const res = await fetch("http://127.0.0.1:8000/admin/users/add", {
+                method: "POST",
+                headers: {
+                    "Authorization": "Bearer " + token
+                },
+                body: formData
+            });
+
+            const data = await res.json();
+
+            if (data.exists) {
+                alert("Username already exists!");
+            } else if (data.success) {
+                alert("User created successfully!");
+                loadUsers(); // <-- refresh dropdown immediately
+            } else {
+                alert("Something went wrong!");
+            }
+        }
+        async function loadPDFs() {
+            const token = localStorage.getItem("token");
+            const res = await fetch("http://127.0.0.1:8000/admin/pdfs", {
+                headers: { "Authorization": "Bearer " + token }
+            });
+
+            const data = await res.json();
+            const list = document.getElementById("pdfList");
+            list.innerHTML = "";
+
+            data.forEach(pdf => {
+                const option = document.createElement("option");
+                option.value = pdf.name;
+                option.text = pdf.name;
+                list.appendChild(option);
+            });
+        }
+
+        loadPDFs()
+        function filterPDFs() {
+
+            const search = document.getElementById("searchPdf").value.toLowerCase()
+            const options = document.getElementById("pdfList").options
+
+            for (let i = 0; i < options.length; i++) {
+
+                let txt = options[i].text.toLowerCase()
+
+                if (txt.includes(search)) {
+                    options[i].style.display = ""
+                }
+                else {
+                    options[i].style.display = "none"
+                }
+
+            }
+
+        }
+        async function deletePDF() {
+
+            const file = document.getElementById("pdfList").value
+
+            const res = await fetch(`http://127.0.0.1:8000/admin/pdfs/delete/${file}`, {
+                method: "DELETE"
+            })
+
+            const data = await res.json()
+
+            alert(data.message)
+
+            loadPDFs()
+
+        }
+        function toggleUsers() {
+
+            const section = document.getElementById("usersDropdown")
+
+            if (section.style.display === "block") {
+                section.style.display = "none"
+            }
+            else {
+                section.style.display = "block"
+                loadUsers()
+            }
+
+        }
+        async function loadUsers() {
+            const token = localStorage.getItem("token");
+
+            const res = await fetch("http://127.0.0.1:8000/admin/users", {
+                headers: { "Authorization": "Bearer " + token }
+            });
+
+            const data = await res.json();
+
+            // Update counts
+            document.getElementById("teacherCount").innerText = data.teachers.length;
+            document.getElementById("studentCount").innerText = data.students.length;
+            document.getElementById("adminCount").innerText = data.admins.length; // <-- count of admins
+
+            const adminList = document.getElementById("adminList");
+            adminList.innerHTML = "";
+
+            data.admins.forEach(a => {
+                let li = document.createElement("li");
+                li.innerText = `${a.full_name} (${a.username})`; // shows both full name and username
+                adminList.appendChild(li);
+            });
+
+            // Update teacher list
+            const teacherList = document.getElementById("teacherList");
+            teacherList.innerHTML = "";
+            data.teachers.forEach(t => {
+                let li = document.createElement("li");
+                li.innerText = `${t.full_name} (${t.username})`;
+                teacherList.appendChild(li);
+            });
+
+            // Update student list
+            const studentList = document.getElementById("studentList");
+            studentList.innerHTML = "";
+            data.students.forEach(s => {
+                let li = document.createElement("li");
+                li.innerText = `${s.full_name} (${s.username})`;
+                studentList.appendChild(li);
+            });
+
+            // Also populate userList for delete dropdown
+            const userList = document.getElementById("userList");
+            userList.innerHTML = "";
+            allUsers = [...data.teachers, ...data.students, ...data.admins];
+
+            renderUsers(allUsers);
+            
+        }
+
+        function loadUserDropdown(data) {
+            const list = document.getElementById("userList");
+            list.innerHTML = "";
+
+            const allUsers = [...data.teachers, ...data.students, ...data.admins];
+
+            allUsers.forEach(user => {
+                let option = document.createElement("option");
+                option.value = user.username;
+                option.text = `${user.full_name} (${user.username})`;
+                list.appendChild(option);
+            });
+        }
+
+        loadUsers();
+        function filterUsers() {
+
+            const search = document
+                .getElementById("searchUser")
+                .value
+                .toLowerCase();
+
+            const filtered = allUsers.filter(user =>
+                user.username.toLowerCase().includes(search) ||
+                user.full_name.toLowerCase().includes(search)
+            );
+
+            renderUsers(filtered);
+
+        }
+        async function deleteUser() {
+
+            const username = document.getElementById("userList").value
+            const token = localStorage.getItem("token")
+
+            if (!username) {
+                alert("Select a user first")
+                return
+            }
+
+            const res = await fetch(`http://127.0.0.1:8000/admin/users/delete/${username}`, {
+                method: "DELETE",
+                headers: {
+                    "Authorization": "Bearer " + token
+                }
+            })
+
+            const data = await res.json()
+
+            if (data.deleted) {
+                alert("Deleted: " + data.deleted)
+
+                // refresh UI
+                loadUsers()
+                loadDashboardStats()
+
+            } else {
+                alert("Delete failed")
+            }
+        }
+        function toggleReferencePDFs() {
+
+            const section = document.getElementById("referenceDropdown")
+
+            if (section.style.display === "block") {
+                section.style.display = "none"
+            }
+            else {
+                section.style.display = "block"
+                loadReferencePDFs()
+            }
+
+        }
+
+        async function loadReferencePDFs() {
+            const token = localStorage.getItem("token");
+
+            const res = await fetch("http://127.0.0.1:8000/admin/pdfs", {
+                headers: { "Authorization": "Bearer " + token }
+            });
+
+            const data = await res.json();
+
+            const dropdown = document.getElementById("referenceList");
+            const list = document.getElementById("pdfList");
+
+            dropdown.innerHTML = "";
+            list.innerHTML = "";
+
+            data.forEach(pdf => {
+                // Dropdown list
+                const li = document.createElement("li");
+                li.innerText = `${pdf.name} (by id=${pdf.uploaded_by}, ${pdf.uploaded_at})`;
+                dropdown.appendChild(li);
+
+                // Select list for deletion
+                const option = document.createElement("option");
+                option.value = pdf.name;
+                option.text = pdf.name;
+                list.appendChild(option);
+            });
+        }
+        function renderUsers(users) {
+
+            const userList = document.getElementById("userList");
+            userList.innerHTML = "";
+
+            if (users.length === 0) {
+                const option = document.createElement("option");
+                option.text = "No user found";
+                option.disabled = true;
+                userList.appendChild(option);
+                return;
+            }
+
+            users.forEach(u => {
+                const option = document.createElement("option");
+                option.value = u.username;
+                option.text = `${u.full_name} (${u.username})`;
+                userList.appendChild(option);
+            });
+
+        }
+        async function changePassword() {
+
+            const current = document.getElementById("currentPassword").value
+            const newPass = document.getElementById("newPasswordChange").value
+            const confirm = document.getElementById("confirmPassword").value
+            const token = localStorage.getItem("token")
+
+            if (newPass !== confirm) {
+                alert("New passwords do not match")
+                return
+            }
+
+            const formData = new FormData()
+            formData.append("current_password", current)
+            formData.append("new_password", newPass)
+
+            const res = await fetch("http://127.0.0.1:8000/admin/change-password", {
+                method: "POST",
+                headers: {
+                    "Authorization": "Bearer " + token
+                },
+                body: formData
+            })
+
+            const data = await res.json()
+
+            if (data.message) {
+                alert(data.message)
+
+                document.getElementById("currentPassword").value = ""
+                document.getElementById("newPasswordChange").value = ""
+                document.getElementById("confirmPassword").value = ""
+            }
+            else {
+                alert(data.detail)
+            }
+        }
+        async function uploadPDFs() {
+            const files = document.getElementById("pdfFiles").files;
+            if (files.length === 0) {
+                alert("Select at least one PDF");
+                return;
+            }
+
+            const token = localStorage.getItem("token");
+            const formData = new FormData();
+
+            for (let i = 0; i < files.length; i++) {
+                formData.append("files", files[i]);
+            }
+
+            const res = await fetch("http://127.0.0.1:8000/upload_reference", {
+                method: "POST",
+                headers: {
+                    "Authorization": "Bearer " + token
+                },
+                body: formData
+            });
+
+            const data = await res.json();
+
+            if (data.message) {
+                alert(data.message);  // <-- shows which files uploaded and which failed
+                document.getElementById("pdfFiles").value = ""; // reset input
+                loadDashboardStats();
+                loadReferencePDFs();
+            } else {
+                alert("Upload failed");
+            }
+        }
+
+        async function deletePDF() {
+            const pdfList = document.getElementById("pdfList");
+            const filename = pdfList.value;
+
+            if (!filename) {
+                alert("Select a PDF first");
+                return;
+            }
+
+            const token = localStorage.getItem("token");
+
+            const res = await fetch(`http://127.0.0.1:8000/admin/pdfs/delete/${filename}`, {
+                method: "DELETE",
+                headers: { "Authorization": "Bearer " + token }
+            });
+
+            const data = await res.json();
+
+            if (data.message) {
+                alert(data.message);
+                loadDashboardStats();   // refresh stats cards
+                loadReferencePDFs();    // refresh dropdown and list
+            } else {
+                alert("Delete failed");
+            }
+        }
+
+        // Check system status for offline badge
+        async function checkSystemStatus() {
+            try {
+                const res = await fetch('http://127.0.0.1:8000/api/system/status');
+                const status = await res.json();
+                const badge = document.getElementById('offlineBadge');
+                const badgeText = document.getElementById('badgeText');
+                const banner = document.getElementById('degradedBanner');
+                if (status.offline_mode && !status.degraded) {
+                    badge.classList.add('offline');
+                    badgeText.textContent = 'Offline Mode';
+                } else if (status.degraded) {
+                    badge.classList.add('degraded');
+                    badgeText.textContent = 'Degraded Mode';
+                    banner.classList.add('active');
+                }
+            } catch (err) {
+                console.log('Status check failed:', err);
+            }
+        }
+        checkSystemStatus();
+    </script>
+
+</body>
+
+</html>

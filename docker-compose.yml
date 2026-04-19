@@ -1,0 +1,99 @@
+# =============================================================================
+# DiffSense-AI Docker Compose Configuration
+# Full-stack deployment: MySQL + FastAPI Backend + Nginx Frontend
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ── MySQL Database ─────────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: diffsense-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: admin_db
+      MYSQL_USER: ${MYSQL_USER:-diffsense}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-rootpassword}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - diffsense-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  diffsense-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: diffsense-api
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # Offline mode settings
+      OFFLINE_MODE: ${OFFLINE_MODE:-true}
+      ALLOW_MODEL_DOWNLOADS: ${ALLOW_MODEL_DOWNLOADS:-false}
+      MODEL_DIR: /app/models
+
+      # Database connection (use service name 'mysql' as host)
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-admin_db}
+
+      # Security (MUST change in production!)
+      SECRET_KEY: ${SECRET_KEY:-CHANGE_THIS_IN_PRODUCTION_TO_RANDOM_SECRET}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+
+      # Paths
+      REFERENCE_DIR: /app/aidiffchecker/backend/data/reference_pdfs
+      STUDENT_ROOT: /app/aidiffchecker/backend/data/user_uploads
+      TEACHER_ROOT: /app/aidiffchecker/backend/data/teacher_uploads
+      RESULT_ROOT: /app/data/result_pdfs
+    volumes:
+      # Persist uploaded files and results
+      - ./data/result_pdfs:/app/data/result_pdfs
+      - ./aidiffchecker/backend/data/reference_pdfs:/app/aidiffchecker/backend/data/reference_pdfs
+      - ./aidiffchecker/backend/data/user_uploads:/app/aidiffchecker/backend/data/user_uploads
+      - ./aidiffchecker/backend/data/teacher_uploads:/app/aidiffchecker/backend/data/teacher_uploads
+      # Models (read-only, pre-downloaded)
+      - ./models:/app/models:ro
+    ports:
+      - "8000:8000"
+    networks:
+      - diffsense-network
+    restart: unless-stopped
+
+  # ── Nginx Frontend ─────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: diffsense-nginx
+    depends_on:
+      - diffsense-api
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./aidiffchecker/frontend:/usr/share/nginx/html:ro
+    ports:
+      - "80:80"
+    networks:
+      - diffsense-network
+    restart: unless-stopped
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  mysql_data:
+    driver: local
+
+# ── Networks ─────────────────────────────────────────────────────────────────
+networks:
+  diffsense-network:
+    driver: bridge

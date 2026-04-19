@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Diff Checker – Login</title>
+  <script src="assets/css/tailwind.min.js"></script>
+  <style>
+    @keyframes float {
+      0%,100% { transform: translateY(0) rotate(0deg) scale(1); }
+      25%      { transform: translateY(-10px) rotate(2deg) scale(1.02); }
+      50%      { transform: translateY(-15px) rotate(-2deg) scale(1.05); }
+      75%      { transform: translateY(-10px) rotate(1deg) scale(1.02); }
+    }
+    .floating-img { animation: float 4s ease-in-out infinite; }
+    /* Offline status badge */
+    .offline-badge {
+      position: fixed; top: 10px; right: 10px;
+      padding: 8px 16px; border-radius: 6px;
+      font-size: 12px; font-weight: 600; z-index: 9999; display: none;
+    }
+    .offline-badge.offline { background: #10b981; color: white; display: block; }
+    .offline-badge.degraded { background: #f59e0b; color: white; display: block; }
+  </style>
+</head>
+
+<body class="min-h-screen flex bg-gray-100">
+  <!-- Offline status badge -->
+  <div id="offlineBadge" class="offline-badge">
+    <span id="badgeText">Checking...</span>
+  </div>
+
+  <!-- LEFT — branding -->
+  <div class="w-1/2 bg-pink-600 text-white flex flex-col justify-center items-center p-10">
+    <img
+      src="assets/images/login-bg.jpg"
+      class="rounded-xl shadow-lg mb-6 w-80 floating-img"
+      alt="AI Diff Checker"
+    />
+    <h1 class="text-3xl font-bold mb-4">AI Diff Checker</h1>
+    <p class="text-lg text-center max-w-md">
+      Detect document similarity and plagiarism using AI-powered comparison tools.
+      Upload PDFs, compare assignments, and analyse results instantly.
+    </p>
+  </div>
+
+  <!-- RIGHT — login form -->
+  <div class="w-1/2 flex items-center justify-center bg-gray-100">
+    <div class="bg-white shadow-xl rounded-xl p-10 w-96">
+      <h2 class="text-2xl font-bold text-center mb-6">Login</h2>
+
+      <!-- Error banner (hidden by default) -->
+      <div
+        id="errorBanner"
+        class="hidden mb-4 p-3 bg-red-100 text-red-700 rounded-lg text-sm"
+      ></div>
+
+      <form id="loginForm" class="space-y-4">
+        <input
+          type="text"
+          id="username"
+          placeholder="Username"
+          required
+          class="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-pink-500 outline-none"
+        />
+        <input
+          type="password"
+          id="password"
+          placeholder="Password"
+          required
+          class="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-pink-500 outline-none"
+        />
+        <!-- ✅ NO role dropdown — backend reads role from DB -->
+        <button
+          type="submit"
+          id="loginBtn"
+          class="w-full bg-pink-600 text-white py-3 rounded-lg hover:bg-pink-700 transition flex items-center justify-center gap-2"
+        >
+          Login
+        </button>
+      </form>
+
+      <p class="text-xs text-gray-400 text-center mt-4">
+        Your role is assigned by your admin. Contact them if you cannot log in.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const form      = document.getElementById("loginForm");
+    const loginBtn  = document.getElementById("loginBtn");
+    const errBanner = document.getElementById("errorBanner");
+
+    function showError(msg) {
+      errBanner.textContent = msg;
+      errBanner.classList.remove("hidden");
+    }
+    function hideError() {
+      errBanner.classList.add("hidden");
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      hideError();
+
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+
+      loginBtn.disabled   = true;
+      loginBtn.textContent = "Logging in…";
+
+      const body = new URLSearchParams();
+      body.append("username", username);
+      body.append("password", password);
+
+      try {
+        const res  = await fetch("http://127.0.0.1:8000/token", {
+          method: "POST",
+          body,
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || "Login failed");
+        }
+
+        const data = await res.json();
+        // ✅ Save token + username (role comes back from server)
+        localStorage.setItem("token",    data.access_token);
+        localStorage.setItem("username", username);
+        localStorage.setItem("role",     data.role);
+
+        // Redirect based on role returned by the backend
+        if      (data.role === "admin")   window.location.href = "admin.html";
+        else if (data.role === "teacher") window.location.href = "teacher.html";
+        else if (data.role === "student") window.location.href = "student.html";
+        else showError("Unknown role: " + data.role);
+
+      } catch (err) {
+        showError(err.message || "Login failed. Check your credentials.");
+      } finally {
+        loginBtn.disabled    = false;
+        loginBtn.textContent = "Login";
+      }
+    });
+
+    // Check system status for offline badge
+    async function checkSystemStatus() {
+      try {
+        const res = await fetch('http://127.0.0.1:8000/api/system/status');
+        const status = await res.json();
+        const badge = document.getElementById('offlineBadge');
+        const badgeText = document.getElementById('badgeText');
+        if (status.offline_mode && !status.degraded) {
+          badge.classList.add('offline');
+          badgeText.textContent = 'Offline Mode';
+        } else if (status.degraded) {
+          badge.classList.add('degraded');
+          badgeText.textContent = 'Degraded Mode';
+        }
+      } catch (err) {
+        console.log('Status check failed:', err);
+      }
+    }
+    checkSystemStatus();
+  </script>
+</body>
+</html>

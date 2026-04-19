@@ -1,0 +1,1383 @@
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\venv\Scripts\Activate.ps1
+python -m uvicorn backend.main:app --reload
+
+C:\Users\Asus>cd C:\Users\Asus\Desktop\aidiffchecker\backend
+C:\Users\Asus\Desktop\aidiffchecker\backend>cd C:\Users\Asus\Desktop\aidiffchecker
+
+C:\Users\Asus\Desktop\aidiffchecker>venv\Scripts\activate.bat
+
+cd C:\Users\Asus\Desktop\aidiffchecker\frontend
+python -m http.server 5500
+
+http://127.0.0.1:5500/index.html
+
+
+"""
+engine.py  -  AI Plagiarism Detection Engine  (v5 — Turnitin-exact layout)
+
+Layout (mirrors the Turnitin screenshot exactly):
+  LEFT  panel : highlighted document text ONLY
+  RIGHT panel : Match Overview ONLY
+                  ┌─────────────────────────┐
+                  │  Match Overview       × │  ← red bar
+                  │         72%             │  ← big coloured %
+                  │   ‹              ›      │  ← nav arrows
+                  │─────────────────────────│
+                  │ 1  Source Name   15%  > │
+                  │    Publication           │
+                  │─────────────────────────│
+                  │ 2  ...                  │
+                  └─────────────────────────┘
+
+Similarity fix: all percentages divide by uncited_total (not total_chunks).
+"""
+
+import os
+import re
+import hashlib
+import pickle
+import logging
+from collections import defaultdict
+import numpy as np
+import faiss
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from rank_bm25 import BM25Okapi
+
+from backend.nlp_utils import get_embeddings, remove_references
+from backend.pdf_utils import extract_text, extract_tables, extract_images, image_similarity
+from backend.user_db   import save_result
+
+from reportlab.platypus import (
+    BaseDocTemplate, Frame, PageTemplate, FrameBreak,
+    Paragraph, Spacer, Table, TableStyle, HRFlowable,
+    NextPageTemplate, PageBreak,
+)
+from reportlab.lib           import colors
+from reportlab.lib.styles    import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units     import cm
+from reportlab.lib.enums     import TA_LEFT, TA_CENTER, TA_RIGHT
+
+# ---------------------------------------------------------------------------
+# Diagnostic logger
+# ---------------------------------------------------------------------------
+os.makedirs("backend/data", exist_ok=True)
+_diag_log = logging.getLogger("sim_diagnostics")
+_diag_log.setLevel(logging.DEBUG)
+if not _diag_log.handlers:
+    _fh = logging.FileHandler("backend/data/sim_diagnostics.log",
+                               mode="w", encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(message)s"))
+    _diag_log.addHandler(_fh)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+REFERENCE_DIR   = "backend/data/reference_pdfs"
+RESULT_ROOT     = "data/result_pdfs"
+EMBED_CACHE_DIR = "backend/data/embed_cache"
+
+DIRECT_COMBINED_OV    = 0.60   # sem >= PARAPHRASE_HIGH_SEM AND ov >= this
+                                #   -> direct copy with minor edits, not a rewrite
+DIRECT_WORD_OVERLAP   = 0.75   # ≥75% of user-sentence words appear verbatim
+DIRECT_SEM_SIM        = 0.92   # cosine ≥ 0.92 → near-identical → direct
+PARAPHRASE_SEM_SIM    = 0.82   # cosine ≥ 0.82 → high similarity
+PARAPHRASE_HIGH_SEM   = 0.85   # cosine ≥ 0.88: so high that even near-zero
+                                #   word overlap confirms same content (sophisticated
+                                #   paraphrase via complete synonym substitution)
+PARAPHRASE_WORD_FLOOR = 0.22   # RAISED: ≥22% word overlap required (was 0.15)
+MIN_CONTENT_WORDS     = 3      # RAISED: ≥3 shared non-stopword tokens (was 2)
+SEMANTIC_SEM_SIM      = 0.73   # RAISED: from 0.70 — cuts same-domain FPs
+RELATIVE_MARGIN       = 0.08   # RAISED: from 0.05 — stricter adaptive gate
+ 
+TABLE_SIM_THRESHOLD   = 0.95
+IMAGE_DIFF_THRESHOLD  = 1000
+BM25_HIGH_THRESHOLD   = 2.0
+BM25_TOP_K            = 5
+CHUNK_STEP_RATIO      = 0.5
+MAX_WORKERS           = 4
+NEURAL_BATCH_SIZE     = 32
+
+_CITED = re.compile(
+    r"(\([A-Z][a-zA-Z]+(?: et al\.)?[,\s]+\d{4}\))"
+    r"|(\[\d+(?:[,\-]\d+)*\])"
+    r"|(ibid\.?|op\.\s?cit\.?)",
+    re.IGNORECASE,
+)
+
+_STOPWORDS = {
+    "the","a","an","and","or","but","in","on","at","to","for","of","with",
+    "by","from","is","are","was","were","be","been","being","have","has",
+    "had","do","does","did","will","would","could","should","may","might",
+    "this","that","these","those","it","its","they","their","we","our",
+    "as","if","then","than","so","yet","both","each","more","also","not",
+    "no","nor","about","after","before","between","into","through","during",
+    "which","who","what","when","where","how","all","any","some","such",
+}
+
+# ---------------------------------------------------------------------------
+# Detection helpers
+# ---------------------------------------------------------------------------
+
+def _l2_normalize(embs: np.ndarray) -> np.ndarray:
+    """L2-normalize rows so dot product == cosine similarity."""
+    norms = np.linalg.norm(embs, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1e-10, norms)
+    return embs / norms
+
+def _tokenize(text):
+    return re.sub(r"[^\w\s]", "", text.lower()).split()
+
+def _split_chunks(text, chunk_words=50):
+    chunks = []
+    step = max(int(chunk_words * CHUNK_STEP_RATIO), 20)
+    
+    # Split text into paragraphs (double newlines) to avoid bridge chunks
+    paragraphs = re.split(r'\n\s*\n', text.strip())
+    if not paragraphs:
+        paragraphs = [text]
+        
+    for p in paragraphs:
+        words = p.split()
+        for i in range(0, len(words), step):
+            chunk_slice = words[i: i + chunk_words]
+            # Still keeps your original >= 8 word minimum
+            if len(chunk_slice) >= 8:
+                chunks.append(" ".join(chunk_slice))
+                
+    return chunks
+
+def _word_overlap(a, b):
+    sa = set(re.sub(r"[^\w\s]", "", a.lower()).split())
+    sb = set(re.sub(r"[^\w\s]", "", b.lower()).split())
+    return len(sa & sb) / len(sa) if sa else 0.0
+
+def _content_word_overlap(a, b):
+    sa = {w for w in re.sub(r"[^\w\s]", "", a.lower()).split()
+          if w not in _STOPWORDS}
+    sb = {w for w in re.sub(r"[^\w\s]", "", b.lower()).split()
+          if w not in _STOPWORDS}
+    return len(sa & sb)
+
+def _is_cited(chunk):
+    return bool(_CITED.search(chunk))
+
+def _classify(sem, overlap, content_overlap, mean_sim):
+    """
+    Classify a (user-chunk, ref-chunk) pair.
+ 
+    Parameters
+    ----------
+    sem            : cosine similarity (float, 0–1, L2-normalised dot product)
+    overlap        : _word_overlap(user, ref) — fraction of user words in ref
+                     Note: includes stopwords; use content_overlap for richer signal
+    content_overlap: count of shared non-stopword tokens
+    mean_sim       : document-level mean cosine (adaptive semantic baseline)
+ 
+    Decision tree (top-to-bottom; first match wins)
+    ────────────────────────────────────────────────
+    DIRECT      sem ≥ DIRECT_SEM_SIM (0.92)
+                  → near-identical phrasing (synonyms, inflections of a copy)
+                OR
+                overlap ≥ DIRECT_WORD_OVERLAP (0.75) AND sem ≥ 0.80
+                  → most surface words match, confirmed by semantics
+ 
+    PARAPHRASE  PARAPHRASE_SEM_SIM (0.82) ≤ sem < DIRECT_SEM_SIM
+                AND overlap ≥ PARAPHRASE_WORD_FLOOR (0.22)
+                  → KEY FIX: genuine rewrite shares vocabulary; same-topic
+                    independently written text does NOT share enough words
+                AND content_overlap ≥ MIN_CONTENT_WORDS (3)
+                  → requires ≥3 non-stopword tokens in common to confirm
+                    content-level overlap (not just shared function words)
+ 
+    SEMANTIC    sem ≥ SEMANTIC_SEM_SIM (0.73)
+                AND sem ≥ mean_sim + RELATIVE_MARGIN (0.08)
+                  → adaptive gate: significantly above doc-level baseline
+                    avoids false positives when user+ref are same domain
+                AND content_overlap ≥ MIN_CONTENT_WORDS (3)
+                AND overlap < DIRECT_WORD_OVERLAP (0.75)
+                  → upper bound is the DIRECT word-overlap floor, not the
+                    PARAPHRASE floor. Pairs that failed PARAPHRASE only
+                    because sem < 0.82 (with moderate overlap 0.22–0.74)
+                    should still be flagged SEMANTIC; capping at 0.22
+                    creates a silent gap where real matches go undetected.
+ 
+    KEY EDGE CASE: sem ≥ 0.82 AND overlap < PARAPHRASE_WORD_FLOOR (0.22)
+    ──────────────────────────────────────────────────────────────
+    This pattern means the embedding says "very similar meaning" but almost
+    no vocabulary is shared.  That is the signature of two authors who
+    *independently* describe the same concept in their own words — NOT a
+    paraphrase of one from the other.  The code correctly lets this fall
+    through to SEMANTIC (or none if below the adaptive gate).
+    """
+ 
+    # ── DIRECT ─────────────────────────────────────────────────────────────
+    if sem >= DIRECT_SEM_SIM:
+        return "direct"
+    if overlap >= DIRECT_WORD_OVERLAP and sem >= SEMANTIC_SEM_SIM:
+        return "direct"
+ 
+    # ── PARAPHRASE ─────────────────────────────────────────────────────────
+    # Path 3: sem is in the high-paraphrase range BUT overlap is moderate
+    # -> copy with some words changed (direct), not a genuine rewrite
+    if sem >= PARAPHRASE_SEM_SIM and overlap >= DIRECT_COMBINED_OV:
+        return "direct"
+    # Path A: standard paraphrase—vocabulary floor confirms intentional reuse
+    if (PARAPHRASE_SEM_SIM <= sem < DIRECT_SEM_SIM
+            and overlap >= PARAPHRASE_WORD_FLOOR
+            and overlap < DIRECT_COMBINED_OV
+            and content_overlap >= MIN_CONTENT_WORDS):
+        return "paraphrase"
+    # Path B: sophisticated rewrite—sem so high (≥ 0.88, but < 0.92 direct)
+    # that even near-zero surface-word overlap still confirms same content.
+    # Catches complete-synonym-substitution paraphrases that Path A misses.
+    if (PARAPHRASE_HIGH_SEM <= sem < DIRECT_SEM_SIM
+            and overlap < DIRECT_COMBINED_OV
+            and content_overlap >= MIN_CONTENT_WORDS):
+        return "paraphrase"
+ 
+    # ── SEMANTIC ───────────────────────────────────────────────────────────
+    relative_threshold = mean_sim + RELATIVE_MARGIN
+    if (sem >= SEMANTIC_SEM_SIM
+            and sem >= relative_threshold
+            and content_overlap >= MIN_CONTENT_WORDS
+            and overlap < DIRECT_WORD_OVERLAP):
+        return "semantic"
+ 
+    return "none"
+ 
+ 
+
+
+# ---------------------------------------------------------------------------
+# Cache
+# ---------------------------------------------------------------------------
+
+def _cache_path(pdf_path):
+    stat = os.stat(pdf_path)
+    key  = f"{pdf_path}:{stat.st_mtime}:{stat.st_size}"
+    h    = hashlib.md5(key.encode()).hexdigest()
+    os.makedirs(EMBED_CACHE_DIR, exist_ok=True)
+    return os.path.join(EMBED_CACHE_DIR, f"{h}.pkl")
+
+CACHE_VERSION = "v4bge"
+
+def _load_ref_data(ref_path):
+    cp = _cache_path(ref_path)
+    if os.path.exists(cp):
+        try:
+            with open(cp, "rb") as f:
+                data = pickle.load(f)
+            if (isinstance(data, tuple) and len(data) == 4
+                    and data[0] == CACHE_VERSION):
+                _, chunks, bm25, index = data
+                return chunks, bm25, index
+        except Exception:
+            pass
+        os.remove(cp)
+
+    ref_text  = remove_references(extract_text(ref_path))
+    chunks    = _split_chunks(ref_text)
+    tokenized = [_tokenize(c) for c in chunks]
+    bm25      = BM25Okapi(tokenized) if tokenized else None
+    if chunks:
+        embs  = _l2_normalize(get_embeddings(chunks).astype("float32"))
+        index = faiss.IndexFlatIP(embs.shape[1])
+        index.add(embs)
+    else:
+        index = faiss.IndexFlatIP(384)
+    with open(cp, "wb") as f:
+        pickle.dump((CACHE_VERSION, chunks, bm25, index), f)
+    return chunks, bm25, index
+
+# ---------------------------------------------------------------------------
+# Per-reference worker
+# ---------------------------------------------------------------------------
+
+def _check_one_reference(ref_path, user_chunks, uncited_mask, user_tables, user_images):
+    ref_name                    = os.path.basename(ref_path)
+    ref_chunks, bm25, faiss_idx = _load_ref_data(ref_path)
+    ref_tables                  = extract_tables(ref_path)
+    ref_images                  = extract_images(ref_path)
+
+    uncited_total = max(sum(uncited_mask), 1)
+    matched       = []
+    type_counts   = {"direct": 0, "paraphrase": 0, "semantic": 0}
+
+    if ref_chunks and bm25:
+        # ------------------------------------------------------------------
+        # Step 1: collect uncited user chunks and their embeddings
+        # ------------------------------------------------------------------
+        uncited_indices = [ui for ui, uc in enumerate(user_chunks) if uncited_mask[ui]]
+        uncited_texts   = [user_chunks[ui] for ui in uncited_indices]
+
+        if not uncited_texts:
+            pass
+        else:
+            # Embed + normalize all uncited user chunks in one pass
+            user_embs = _l2_normalize(get_embeddings(uncited_texts).astype("float32"))
+
+            # ------------------------------------------------------------------
+            # Step 2: for each user chunk, gather candidates from BOTH sources
+            #   (a) BM25 — catches direct copies and keyword-heavy paraphrases
+            #   (b) FAISS — catches semantic / meaning-level matches even when
+            #               vocabulary is completely different
+            # ------------------------------------------------------------------
+            neural_queue = []   # list of (ui, uc, user_emb, candidate_chunks)
+
+            for idx_in_batch, (ui, uc) in enumerate(zip(uncited_indices, uncited_texts)):
+                ue = user_embs[idx_in_batch]
+
+                # BM25 candidates
+                tokens    = _tokenize(uc)
+                bm25_sc   = bm25.get_scores(tokens)
+                bm25_top  = set(np.argsort(bm25_sc)[-BM25_TOP_K:].tolist())
+
+                # FAISS candidates (nearest neighbours in embedding space)
+                query = ue.reshape(1, -1).astype("float32")
+                _, faiss_top = faiss_idx.search(query, BM25_TOP_K)
+                faiss_top_set = set(faiss_top[0].tolist())
+
+                # Union — remove any out-of-range indices (-1 from faiss padding)
+                all_cand_idx = (bm25_top | faiss_top_set) - {-1}
+                candidates   = [ref_chunks[i] for i in sorted(all_cand_idx)]
+
+                if candidates:
+                    neural_queue.append((ui, uc, ue, candidates))
+
+            # ------------------------------------------------------------------
+            # Step 3: compute cosine sims for every (user_chunk, candidate) pair
+            #         using already-computed user embeddings + fresh ref embeds.
+            #         First pass: collect all_best_sims for mean_sim baseline.
+            # ------------------------------------------------------------------
+            if neural_queue:
+                all_best_sims = []
+
+                # Embed all unique candidate texts once
+                all_cand_texts = []
+                for _, _, _, cands in neural_queue:
+                    all_cand_texts.extend(cands)
+                unique_cand_texts = list(dict.fromkeys(all_cand_texts))
+                cand_emb_map = {}
+                for batch_start in range(0, len(unique_cand_texts), NEURAL_BATCH_SIZE):
+                    batch_texts = unique_cand_texts[batch_start: batch_start + NEURAL_BATCH_SIZE]
+                    batch_embs  = _l2_normalize(get_embeddings(batch_texts).astype("float32"))
+                    for t, e in zip(batch_texts, batch_embs):
+                        cand_emb_map[t] = e
+
+                for ui, uc, ue, candidates in neural_queue:
+                    cand_embs = np.stack([cand_emb_map[c] for c in candidates])
+                    sims      = cand_embs @ ue
+                    all_best_sims.append(float(np.max(sims)))
+
+                mean_sim = float(np.mean(all_best_sims)) if all_best_sims else 0.0
+                p25      = float(np.percentile(all_best_sims, 25)) if all_best_sims else 0.0
+                p75      = float(np.percentile(all_best_sims, 75)) if all_best_sims else 0.0
+
+                _diag_log.debug("=" * 60)
+                _diag_log.debug(f"REF: {ref_name}")
+                _diag_log.debug(f"  uncited chunks : {uncited_total}")
+                _diag_log.debug(f"  neural queue   : {len(neural_queue)} (BM25+FAISS candidates)")
+                _diag_log.debug(f"  cosine mean    : {mean_sim:.4f}")
+                _diag_log.debug(f"  cosine p25/p75 : {p25:.4f} / {p75:.4f}")
+                _diag_log.debug(f"  cosine min/max : {min(all_best_sims):.4f} / {max(all_best_sims):.4f}")
+                _diag_log.debug(f"  relative gate  : {mean_sim:.4f} + {RELATIVE_MARGIN} = {mean_sim+RELATIVE_MARGIN:.4f}")
+                _diag_log.debug(f"  SCORES SAMPLE  : {[round(s,3) for s in all_best_sims[:20]]}")
+
+                # ------------------------------------------------------------------
+                # Step 4: classify each user chunk using the document-level mean
+                #         as the adaptive semantic gate.
+                #         Each user chunk is counted at most ONCE (highest priority:
+                #         direct > paraphrase > semantic) to avoid double-counting.
+                # ------------------------------------------------------------------
+                _PRIORITY = {"direct": 3, "paraphrase": 2, "semantic": 1}
+                best_match_per_chunk: dict[int, dict] = {}
+
+                for ui, uc, ue, candidates in neural_queue:
+                    cand_embs = np.stack([cand_emb_map[c] for c in candidates])
+                    sims      = cand_embs @ ue
+                    best_i    = int(np.argmax(sims))
+                    best_sim  = float(sims[best_i])
+                    best_rc   = candidates[best_i]
+                    overlap   = _word_overlap(uc, best_rc)
+                    co        = _content_word_overlap(uc, best_rc)
+                    mt        = _classify(best_sim, overlap, co, mean_sim)
+                    if mt == "none":
+                        continue
+
+                    # Keep only the highest-priority match for this chunk
+                    prev = best_match_per_chunk.get(ui)
+                    if prev is None or _PRIORITY[mt] > _PRIORITY[prev["match_type"]]:
+                        best_match_per_chunk[ui] = {
+                            "user_chunk_idx": ui,
+                            "user_chunk":     uc,
+                            "ref_chunk":      best_rc,
+                            "match_type":     mt,
+                            "similarity":     round(best_sim * 100, 1),
+                            "reference":      ref_name,
+                        }
+
+                matched = list(best_match_per_chunk.values())
+
+                # Count every matched chunk directly.
+                # The denominator (uncited_total) also counts every chunk,
+                # so numerator and denominator must use the same unit.
+                # Window-based dedup halved the numerator while leaving
+                # the denominator unchanged, producing ~50% for same-doc.
+                type_counts = {"direct": 0, "paraphrase": 0, "semantic": 0}
+                for m in matched:
+                    type_counts[m["match_type"]] += 1
+
+                _diag_log.debug(f"  MATCHES: {type_counts}")
+
+    def _table_to_text(t):
+        """Convert a table (list-of-lists, DataFrame, or str) to plain text."""
+        try:
+            import pandas as pd
+            if isinstance(t, pd.DataFrame):
+                return " ".join(str(v) for v in t.values.flatten() if str(v) not in ("nan", "None", ""))
+        except ImportError:
+            pass
+        if isinstance(t, (list, tuple)):
+            return " ".join(
+                str(cell)
+                for row in t for cell in (row if isinstance(row, (list, tuple)) else [row])
+                if str(cell) not in ("nan", "None", "")
+            )
+        return str(t)
+
+    table_hits = 0
+    for ut in user_tables:
+        ut_text = _table_to_text(ut)
+        if not ut_text.strip():
+            continue
+        for rt in ref_tables:
+            rt_text = _table_to_text(rt)
+            if not rt_text.strip():
+                continue
+            e1, e2 = _l2_normalize(get_embeddings([ut_text, rt_text]).astype("float32"))
+            sim = float(np.dot(e1, e2))
+            _diag_log.debug(f"  TABLE sim={sim:.4f}  threshold={TABLE_SIM_THRESHOLD}")
+            if sim > TABLE_SIM_THRESHOLD:
+                table_hits += 1
+                break
+
+    def _safe_image_similarity(img_a, img_b, target_size=(256, 256)):
+        """
+        Resize both images to the same dimensions before pixel-diff comparison
+        so that images of different sizes can still be meaningfully compared.
+        Falls back to embedding-based cosine similarity when PIL is unavailable.
+        """
+        try:
+            from PIL import Image as PILImage
+            import numpy as np
+
+            def _to_pil(img):
+                if isinstance(img, PILImage.Image):
+                    return img
+                if isinstance(img, np.ndarray):
+                    return PILImage.fromarray(img.astype("uint8"))
+                if isinstance(img, (str, bytes)):
+                    return PILImage.open(img)
+                raise TypeError(f"Unsupported image type: {type(img)}")
+
+            a = _to_pil(img_a).convert("RGB").resize(target_size, PILImage.LANCZOS)
+            b = _to_pil(img_b).convert("RGB").resize(target_size, PILImage.LANCZOS)
+            arr_a = np.array(a, dtype=float)
+            arr_b = np.array(b, dtype=float)
+            # Mean absolute pixel difference (0 = identical, 255 = max diff)
+            return float(np.mean(np.abs(arr_a - arr_b)))
+        except Exception:
+            # Fallback: delegate to the original function (may still raise)
+            return image_similarity(img_a, img_b)
+
+    image_hits = 0
+    for ui_ in user_images:
+        for ri in ref_images:
+            try:
+                diff = _safe_image_similarity(ui_, ri)
+                _diag_log.debug(f"  IMAGE diff={diff:.2f}  threshold={IMAGE_DIFF_THRESHOLD}")
+                if diff < IMAGE_DIFF_THRESHOLD:
+                    image_hits += 1
+                    break
+            except Exception as exc:
+                _diag_log.debug(f"  IMAGE comparison error: {exc}")
+
+    _diag_log.debug(f"  table_hits={table_hits}  image_hits={image_hits}")
+
+    # ── Percentage calculation ────────────────────────────────────────────
+    # Denominator is always uncited_total (number of uncited text chunks).
+    # This means all percentages answer: "what fraction of the document's
+    # uncited text was matched?" — consistent, user-readable, correct.
+    #
+    # Table and image matches are verbatim → count as direct text-chunk
+    # equivalents (each hit = 1 extra direct chunk in the numerator).
+    # They do NOT inflate the denominator.
+    type_counts["direct"] += table_hits + image_hits
+
+    total_matched = sum(type_counts.values())
+    similarity    = round(min(total_matched / uncited_total * 100, 100.0), 1)
+
+    _diag_log.debug(f"  uncited_total={uncited_total}  total_matched={total_matched}")
+    _diag_log.debug(f"  type_counts={type_counts}")
+    _diag_log.debug(f"  FINAL similarity: {similarity}%")
+
+    return {
+        "reference":     ref_name,
+        "similarity":    similarity,
+        "match_types":   type_counts,
+        "table_matches": table_hits,
+        "image_matches": image_hits,
+        "uncited_total": uncited_total,
+    }, matched
+
+# ---------------------------------------------------------------------------
+# Public detection API
+# ---------------------------------------------------------------------------
+
+def check_plagiarism(user_pdf_path, reference_paths):
+    raw_text     = extract_text(user_pdf_path)
+    clean_text   = remove_references(raw_text)
+    user_chunks  = _split_chunks(clean_text)
+    user_tables  = extract_tables(user_pdf_path)
+    user_images  = extract_images(user_pdf_path)
+    uncited_mask = [not _is_cited(c) for c in user_chunks]
+
+    _diag_log.debug(f"\n{'#'*60}")
+    _diag_log.debug(f"USER PDF: {os.path.basename(user_pdf_path)}")
+    _diag_log.debug(f"  total chunks   : {len(user_chunks)}")
+    _diag_log.debug(f"  uncited chunks : {sum(uncited_mask)}")
+
+    all_results, all_details = [], []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(_check_one_reference,
+                        ref_path, user_chunks, uncited_mask,
+                        user_tables, user_images): ref_path
+            for ref_path in reference_paths
+        }
+        for future in as_completed(futures):
+            result, matched = future.result()
+            all_results.append(result)
+            all_details.extend(matched)
+
+    all_details.sort(key=lambda d: d["similarity"], reverse=True)
+    return all_results, all_details, user_chunks, uncited_mask
+
+# ---------------------------------------------------------------------------
+# Colour helpers
+# ---------------------------------------------------------------------------
+
+_PALETTES = [
+    (colors.HexColor("#1a6a8a"), colors.HexColor("#d4eaf5")),
+    (colors.HexColor("#c0622b"), colors.HexColor("#fbe8da")),
+    (colors.HexColor("#2e7d32"), colors.HexColor("#dcedc8")),
+    (colors.HexColor("#8e1c3e"), colors.HexColor("#fce4ec")),
+    (colors.HexColor("#1a237e"), colors.HexColor("#e8eaf6")),
+    (colors.HexColor("#4a148c"), colors.HexColor("#f3e5f5")),
+    (colors.HexColor("#bf360c"), colors.HexColor("#fbe9e7")),
+    (colors.HexColor("#004d40"), colors.HexColor("#e0f2f1")),
+]
+
+def _pfg(i): return _PALETTES[i % len(_PALETTES)][0]
+def _pbg(i): return _PALETTES[i % len(_PALETTES)][1]
+
+# ---------------------------------------------------------------------------
+# Tiered highlight tints  (3 levels per source colour)
+#   index 0 = direct match   — darkest tint   (most visual weight)
+#   index 1 = paraphrase     — medium tint
+#   index 2 = semantic       — lightest tint
+# ---------------------------------------------------------------------------
+_PALETTE_TINTS = [
+    ("#b8d6e3", "#cfe6f0", "#e5f2f8"),   # 0  blue
+    ("#f0c8aa", "#f7ddc9", "#fceee4"),   # 1  orange-brown
+    ("#b8ddb9", "#ccead0", "#e2f4e3"),   # 2  green
+    ("#f0b3c8", "#f7cad9", "#fce3ec"),   # 3  pink
+    ("#bdc3e5", "#d0d5ef", "#e6e8f7"),   # 4  indigo
+    ("#d8b4e2", "#e5caed", "#f2e4f7"),   # 5  purple
+    ("#f5bda8", "#fad1c2", "#fde8df"),   # 6  deep-orange
+    ("#9fd3cf", "#bbe3e0", "#d8f0ef"),   # 7  teal
+]
+_PALETTE_FG_HEX = [
+    "#0f4f6a", "#8c4010", "#1a5c1e", "#6b0e28",
+    "#0f1860", "#370b62", "#8c2308", "#003530",
+]
+
+# Match-type badge colours — convey severity independent of source colour
+_MT_BADGE_HEX = {
+    "direct":    "#c0392b",   # red   — verbatim copy
+    "paraphrase":"#b7770d",   # amber — rewritten same content
+    "semantic":  "#1a6a8a",   # teal  — related concept
+}
+
+def _bg_hex(palette_idx, match_type):
+    """Tiered hex background: darkest for direct, lightest for semantic."""
+    tints = _PALETTE_TINTS[palette_idx % len(_PALETTE_TINTS)]
+    if match_type == "direct":    return tints[0]
+    if match_type == "paraphrase":return tints[1]
+    return tints[2]
+
+def _fg_hex(palette_idx):
+    """Dark source foreground used for badge text."""
+    return _PALETTE_FG_HEX[palette_idx % len(_PALETTE_FG_HEX)]
+
+def _score_color(v):
+    if v >= 70: return colors.HexColor("#c0392b")
+    if v >= 40: return colors.HexColor("#e67e22")
+    if v >= 20: return colors.HexColor("#f39c12")
+    return           colors.HexColor("#27ae60")
+
+# ---------------------------------------------------------------------------
+# Stats helper
+# ---------------------------------------------------------------------------
+
+def _calc_stats(r, uncited_total):
+    # Use uncited_total as denominator so percentages read as
+    # "X% of the document's uncited text matched this reference."
+    # r["uncited_total"] is passed back from _check_one_reference;
+    # fall back to the caller's value if not present.
+    tc = max(r.get("uncited_total", uncited_total), 1)
+    mt = r["match_types"]
+
+    d  = round(mt["direct"]     / tc * 100, 1)
+    p  = round(mt["paraphrase"] / tc * 100, 1)
+    se = round(mt["semantic"]   / tc * 100, 1)
+
+    # display_pct = total match % for this reference.
+    # Each unit (chunk/table/image) is classified into exactly one type,
+    # so the sum is the correct total — identical to r["similarity"].
+    display_pct = round(min(d + p + se, 100.0), 1)
+
+    _TYPE_NAMES = {
+        "direct":    "Direct Match",
+        "paraphrase":"Paraphrasing",
+        "semantic":  "Semantic Similarity",
+    }
+    _ROW_LABELS = {
+        "direct":    "Publication",
+        "paraphrase":"Student Paper",
+        "semantic":  "Internet Source",
+    }
+    dominant   = max(mt, key=mt.get) if sum(mt.values()) else "semantic"
+    type_label = _ROW_LABELS[dominant]
+
+    non_zero_types     = [k for k, v in mt.items() if v > 0]
+    single_type        = len(non_zero_types) == 1
+    display_type_label = _TYPE_NAMES[non_zero_types[0]] if single_type else ""
+
+    type_parts = []
+    if d  > 0: type_parts.append(f"Dir {d}%")
+    if p  > 0: type_parts.append(f"Par {p}%")
+    if se > 0: type_parts.append(f"Sem {se}%")
+    breakdown_label = "  ·  ".join(type_parts)
+
+    return {
+        "direct":             d,
+        "paraphrase":         p,
+        "semantic":           se,
+        "display_pct":        display_pct,
+        "single_type":        single_type,
+        "display_type_label": display_type_label,
+        "breakdown_label":    breakdown_label,
+        "non_zero_count":     len(non_zero_types),
+        "counts":             mt,
+        "type_label":         type_label,
+    }
+
+# ---------------------------------------------------------------------------
+# Style factory
+# ---------------------------------------------------------------------------
+
+_style_counter = [0]
+
+def _new_ps(base, **kw):
+    _style_counter[0] += 1
+    return ParagraphStyle("s" + str(_style_counter[0]), parent=base, **kw)
+
+def _esc(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+# Sentence boundary pattern: split after .!? followed by whitespace.
+# We keep the delimiter so sentences stay readable.
+_SENT_SPLIT = re.compile(r'(?<=[.!?…])\s+')
+
+def _split_sentences(text):
+    """Split a text block into individual sentences for line-level rendering."""
+    parts = _SENT_SPLIT.split(text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+# ---------------------------------------------------------------------------
+# Report builder
+#
+# LEFT  panel : highlighted document text ONLY
+# RIGHT panel : Match Overview ONLY  (exact Turnitin look)
+# ---------------------------------------------------------------------------
+
+def _build_report(user_pdf_path, results, details, user_chunks, uncited_mask, output_path):
+    S  = getSampleStyleSheet()
+    NR = S["Normal"]
+
+    PAGE_W, PAGE_H = A4
+
+    uncited_total = max(sum(uncited_mask), 1)
+    tc            = uncited_total
+
+    # ── stats + sort ──────────────────────────────────────────────────────
+    matched_refs = [r for r in results if sum(r["match_types"].values()) > 0]
+    for r in matched_refs:
+        r["_st"] = _calc_stats(r, uncited_total)
+    # Sort descending by display_pct (avg of non-zero match types)
+    matched_refs.sort(key=lambda r: r["_st"]["display_pct"], reverse=True)
+    src_idx = {r["reference"]: i for i, r in enumerate(matched_refs)}
+
+    # ── index-based chunk_detail ──────────────────────────────────────────
+    # For each chunk keep the single highest-similarity match across all references.
+    # Priority: direct > paraphrase > semantic, then by cosine similarity score.
+    # This ensures the highlighted color reflects the reference that is the
+    # closest actual match for that specific chunk of text.
+    _MT_PRIORITY = {"direct": 3, "paraphrase": 2, "semantic": 1}
+    chunk_detail = {}
+    for d in details:
+        ci = d["user_chunk_idx"]
+        prev = chunk_detail.get(ci)
+        if prev is None:
+            chunk_detail[ci] = d
+        else:
+            new_pri  = _MT_PRIORITY.get(d["match_type"],    0)
+            prev_pri = _MT_PRIORITY.get(prev["match_type"], 0)
+            if new_pri > prev_pri or (new_pri == prev_pri
+                                      and d["similarity"] > prev["similarity"]):
+                chunk_detail[ci] = d
+
+    # ── overall stats ────────────────────────────────────────────────────
+    # Use chunk_detail (each chunk resolved to one type from its best-matching
+    # reference) so no chunk is double-counted across references.
+    # Overall denominator = max total_content across references (most inclusive).
+    ov_type_counts = {"direct": 0, "paraphrase": 0, "semantic": 0}
+    for cd in chunk_detail.values():
+        ov_type_counts[cd["match_type"]] += 1
+
+    # Add table/image direct hits: for each reference take its table+image hits,
+    # then use the maximum (conservative: avoid double-counting media across refs).
+    max_media_direct = max(
+        (r["table_matches"] + r["image_matches"] for r in results), default=0)
+    ov_type_counts["direct"] += max_media_direct
+
+    # Denominator: uncited_total (text chunks only — consistent with per-ref stats)
+    ov_tc = max(uncited_total, 1)
+
+    ov_d  = round(ov_type_counts["direct"]     / ov_tc * 100, 1)
+    ov_p  = round(ov_type_counts["paraphrase"] / ov_tc * 100, 1)
+    ov_se = round(ov_type_counts["semantic"]   / ov_tc * 100, 1)
+    ov_av = round(min(ov_d + ov_p + ov_se, 100.0), 1)
+
+    # ── highest display_pct among matched refs (shown as big % in Match Overview) ──
+    ov_top = max((r["_st"]["display_pct"] for r in matched_refs), default=0)
+
+    # ── page geometry ─────────────────────────────────────────────────────
+    HDR_H = 2.0 * cm
+    BOT   = 1.0 * cm
+    ML    = 1.2 * cm
+    MR    = 0.8 * cm
+    RW    = 7.0 * cm      # right panel width
+    GAP   = 0.25 * cm
+    LW    = PAGE_W - ML - MR - RW - GAP
+    FH    = PAGE_H - HDR_H - BOT
+
+    lframe = Frame(ML,         BOT, LW, FH, id="L",
+                   leftPadding=4, rightPadding=4, topPadding=8, bottomPadding=4)
+    rframe = Frame(ML+LW+GAP,  BOT, RW, FH, id="R",
+                   leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+
+    # Full-width frame for the summary page at the end
+    SUM_ML = 1.4 * cm
+    SUM_MR = 1.4 * cm
+    SUM_W  = PAGE_W - SUM_ML - SUM_MR
+    sum_frame = Frame(SUM_ML, BOT, SUM_W, FH, id="S",
+                      leftPadding=6, rightPadding=6, topPadding=10, bottomPadding=4)
+
+    def _draw_page(canvas, doc):
+        canvas.saveState()
+        # Header bar
+        canvas.setFillColor(colors.HexColor("#1a252f"))
+        canvas.rect(0, PAGE_H - HDR_H, PAGE_W, HDR_H, fill=1, stroke=0)
+        # File name
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 9)
+        canvas.drawString(ML, PAGE_H - 1.05*cm, os.path.basename(user_pdf_path))
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#aab7b8"))
+        canvas.drawString(ML, PAGE_H - 1.65*cm, "Plagiarism Detection Report")
+        # Overall % top-right
+        canvas.setFillColor(_score_color(ov_top))
+        canvas.setFont("Helvetica-Bold", 20)
+        canvas.drawRightString(PAGE_W - MR, PAGE_H - 1.05*cm, f"{ov_top}%")
+        canvas.setFont("Helvetica", 6.5)
+        canvas.setFillColor(colors.HexColor("#aab7b8"))
+        canvas.drawRightString(PAGE_W - MR, PAGE_H - 1.62*cm,
+            f"D {ov_d}%  P {ov_p}%  Se {ov_se}%")
+        # Vertical separator
+        sep = ML + LW + GAP / 2
+        canvas.setStrokeColor(colors.HexColor("#d5d8dc"))
+        canvas.setLineWidth(0.5)
+        canvas.line(sep, BOT, sep, PAGE_H - HDR_H)
+        # Page number
+        canvas.setFont("Helvetica", 6.5)
+        canvas.setFillColor(colors.HexColor("#95a5a6"))
+        canvas.drawCentredString(PAGE_W / 2, BOT - 0.5*cm, str(doc.page))
+        canvas.restoreState()
+
+    tmpl = PageTemplate(id="P", frames=[lframe, rframe], onPage=_draw_page)
+
+    def _draw_summary_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(colors.HexColor("#1a252f"))
+        canvas.rect(0, PAGE_H - HDR_H, PAGE_W, HDR_H, fill=1, stroke=0)
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 9)
+        canvas.drawString(SUM_ML, PAGE_H - 1.05*cm, os.path.basename(user_pdf_path))
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#aab7b8"))
+        canvas.drawString(SUM_ML, PAGE_H - 1.65*cm, "Plagiarism Detection Report — Summary Analysis")
+        canvas.setFont("Helvetica", 6.5)
+        canvas.setFillColor(colors.HexColor("#95a5a6"))
+        canvas.drawCentredString(PAGE_W / 2, BOT - 0.5*cm, str(doc.page))
+        canvas.restoreState()
+
+    sum_tmpl = PageTemplate(id="Summary", frames=[sum_frame], onPage=_draw_summary_page)
+    doc  = BaseDocTemplate(output_path, pagesize=A4, pageTemplates=[tmpl, sum_tmpl])
+    story = []
+
+    # =========================================================
+    # LEFT PANEL — highlighted document text ONLY
+    # =========================================================
+    # ── Match-type highlight palette (kept for reference, no longer used in left panel) ──
+    # Left panel now uses reference-PDF palette colours instead of match-type colours.
+
+    plain_style = _new_ps(NR, fontSize=8.5, leading=13.5, spaceAfter=2,
+                           textColor=colors.HexColor("#2c3e50"))
+
+    if not chunk_detail:
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(
+            "No significant matches found. This document appears to be original.",
+            _new_ps(NR, fontSize=9, textColor=colors.HexColor("#27ae60"), leading=13)))
+    else:
+        # ── Reference-PDF colour legend ────────────────────────────────────
+        # Each column shows one reference PDF's assigned colour swatch + name.
+        # Show up to 4 per row; wrap onto additional rows if needed.
+        if matched_refs:
+            legend_cols_per_row = 4
+            # Build (global_ref_index, Paragraph) pairs; None means padding cell
+            legend_pairs = []
+            for ri, r in enumerate(matched_refs):
+                fname = r["reference"]
+                short = fname[:18] + "…" if len(fname) > 18 else fname
+                legend_pairs.append(
+                    (ri, Paragraph(f"■ {short}",
+                                   _new_ps(NR, fontSize=6.0,
+                                            textColor=_pfg(ri), leading=9))))
+
+            # Pad to a full row with (None, empty Paragraph) sentinels
+            while len(legend_pairs) % legend_cols_per_row != 0:
+                legend_pairs.append((None, Paragraph("", _new_ps(NR, fontSize=6))))
+
+            legend_rows = [
+                legend_pairs[i:i + legend_cols_per_row]
+                for i in range(0, len(legend_pairs), legend_cols_per_row)
+            ]
+            col_w = LW / legend_cols_per_row
+            for row_pairs in legend_rows:
+                row_items = [p for _, p in row_pairs]
+                leg_tbl = Table([row_items],
+                                colWidths=[col_w] * legend_cols_per_row)
+                cell_styles = [("TOPPADDING",    (0,0), (-1,-1), 3),
+                               ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                               ("LEFTPADDING",   (0,0), (-1,-1), 5),
+                               ("LINEBELOW",     (0,0), (-1,-1), 0.4,
+                                colors.HexColor("#d5d8dc"))]
+                for col_i, (gi, _) in enumerate(row_pairs):
+                    if gi is not None:
+                        cell_styles.append(("BACKGROUND", (col_i,0), (col_i,0),
+                                            _pbg(gi)))
+                leg_tbl.setStyle(TableStyle(cell_styles))
+                story.append(leg_tbl)
+
+            # Badge legend: explains match TYPE and its severity colour
+            badge_legend = Table([[
+                Paragraph(
+                    f'<font color="{_MT_BADGE_HEX["direct"]}"><b>[D]</b></font>'
+                    ' = Direct Match',
+                    _new_ps(NR, fontSize=6, textColor=colors.HexColor("#2c3e50"),
+                             leading=8)),
+                Paragraph(
+                    f'<font color="{_MT_BADGE_HEX["paraphrase"]}"><b>[P]</b></font>'
+                    ' = Paraphrasing',
+                    _new_ps(NR, fontSize=6, textColor=colors.HexColor("#2c3e50"),
+                             leading=8)),
+                Paragraph(
+                    f'<font color="{_MT_BADGE_HEX["semantic"]}"><b>[S]</b></font>'
+                    ' = Semantic Similarity',
+                    _new_ps(NR, fontSize=6, textColor=colors.HexColor("#2c3e50"),
+                             leading=8)),
+            ]], colWidths=[LW*0.28, LW*0.30, LW*0.42])
+            badge_legend.setStyle(TableStyle([
+                ("TOPPADDING",    (0,0), (-1,-1), 2),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+                ("LEFTPADDING",   (0,0), (-1,-1), 5),
+                ("BACKGROUND",    (0,0), (-1,-1), colors.HexColor("#eaf0fb")),
+            ]))
+            story.append(badge_legend)
+
+        _MT_LABEL = {"direct": "D", "paraphrase": "P", "semantic": "S"}
+        _MT_PRI   = {"direct": 3, "paraphrase": 2, "semantic": 1}
+
+        # Rebuild original word sequence from overlapping chunks:
+        # take only the non-overlapping tail of each successive chunk.
+        _CW   = 50
+        _CSTEP = max(int(_CW * CHUNK_STEP_RATIO), 20)
+        if user_chunks:
+            _full_words = list(user_chunks[0].split())
+            for _ci in range(1, len(user_chunks)):
+                _tail = user_chunks[_ci].split()[_CW - _CSTEP:]
+                _full_words.extend(_tail)
+        else:
+            _full_words = []
+        _original_sents = _split_sentences(" ".join(_full_words))
+
+        # Pre-build (ref_word_set, cd) for each matched chunk so we
+        # can do fast word-overlap checks per sentence.
+        import re as _re
+        def _wset(t):
+            return set(_re.sub(r'[^\w\s]', '', t.lower()).split())
+
+        _ref_entries = []
+        for _ci, _cd in chunk_detail.items():
+            if _cd["reference"] not in src_idx:
+                continue
+            _ref_entries.append((_wset(_cd["ref_chunk"]), _cd))
+
+        story.append(Spacer(1, 4))
+        for sent in _original_sents:
+            if not sent.strip():
+                continue
+            safe = _esc(sent)
+            if not safe:
+                continue
+
+            sent_wset = _wset(sent)
+            if not sent_wset:
+                story.append(Paragraph(safe, plain_style))
+                continue
+
+            # Find the best-matching reference chunk for this sentence.
+            # Use actual word overlap against the reference chunk text
+            # (not positional ranges) to avoid highlighting unrelated
+            # intermediate sentences or mis-attributing colour.
+            best_cd    = None
+            best_score = 0.0
+            for (_rset, _cd) in _ref_entries:
+                if not _rset:
+                    continue
+                # fraction of this sentence's content words found in ref
+                _ov = len(sent_wset & _rset) / len(sent_wset)
+                # weight by match priority so direct beats paraphrase
+                _score = _ov * (1 + 0.05 *
+                                _MT_PRI.get(_cd.get("match_type", ""), 0))
+                if _ov >= 0.30 and _score > best_score:
+                    best_score = _score
+                    best_cd    = _cd
+
+            if best_cd is not None:
+                si       = src_idx[best_cd["reference"]]
+                mt       = best_cd.get("match_type", "semantic")
+                tag      = _MT_LABEL.get(mt, "")
+                bg_color = colors.HexColor(_bg_hex(si, mt))
+                badge_c  = _MT_BADGE_HEX.get(mt, "#555555")
+                markup   = (
+                    f'<font size="6" color="{badge_c}"><b>[{tag}]</b></font>'
+                    f' <font color="#2c3e50">{safe}</font>'
+                )
+                story.append(Paragraph(
+                    markup,
+                    _new_ps(NR, fontSize=8.5, leading=13, spaceAfter=0,
+                            spaceBefore=0, rightIndent=6,
+                            backColor=bg_color,
+                            textColor=colors.HexColor("#2c3e50"))))
+            else:
+                story.append(Paragraph(
+                    safe,
+                    _new_ps(NR, fontSize=8.5, leading=13, spaceAfter=0,
+                            spaceBefore=0,
+                            textColor=colors.HexColor("#2c3e50"))))
+
+    story.append(FrameBreak())
+
+    # =========================================================
+    # RIGHT PANEL — Match Overview  (Turnitin layout)
+    # =========================================================
+
+    # 1 ── Red title bar ───────────────────────────────────────────────────
+    title_bar = Table([[
+        Paragraph("<b>Match Overview</b>",
+                  _new_ps(NR, fontSize=8.5, fontName="Helvetica-Bold",
+                           textColor=colors.white, leading=11)),
+        Paragraph("×",
+                  _new_ps(NR, fontSize=11,
+                           textColor=colors.HexColor("#f5b7b1"),
+                           alignment=TA_RIGHT, leading=11)),
+    ]], colWidths=[RW - 0.9*cm, 0.9*cm])
+    title_bar.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,-1), colors.HexColor("#c0392b")),
+        ("TOPPADDING",    (0,0), (-1,-1), 9),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 9),
+        ("LEFTPADDING",   (0,0), (0,0),   10),
+        ("LEFTPADDING",   (1,0), (1,0),   0),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 8),
+        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+    ]))
+    story.append(title_bar)
+
+    # 2 ── Big % ───────────────────────────────────────────────────────────
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(
+        f"<b>{ov_top}%</b>",
+        _new_ps(NR, fontSize=54, fontName="Helvetica-Bold",
+                textColor=_score_color(ov_top),
+                alignment=TA_CENTER, leading=60, spaceAfter=0)))
+
+    # 3 ── Nav arrows ‹  ›  ───────────────────────────────────────────────
+    story.append(Spacer(1, 6))
+    nav = Table([[
+        Paragraph("<b>‹</b>",
+                  _new_ps(NR, fontSize=18, fontName="Helvetica-Bold",
+                           textColor=colors.HexColor("#7f8c8d"),
+                           alignment=TA_CENTER, leading=20)),
+        Paragraph("",
+                  _new_ps(NR, fontSize=8,
+                           textColor=colors.HexColor("#bdc3c7"),
+                           alignment=TA_CENTER)),
+        Paragraph("<b>›</b>",
+                  _new_ps(NR, fontSize=18, fontName="Helvetica-Bold",
+                           textColor=colors.HexColor("#7f8c8d"),
+                           alignment=TA_CENTER, leading=20)),
+    ]], colWidths=[RW*0.18, RW*0.64, RW*0.18])
+    nav.setStyle(TableStyle([
+        ("TOPPADDING",    (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 0),
+        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+    ]))
+    story.append(nav)
+    story.append(Spacer(1, 10))
+    story.append(HRFlowable(width=RW, thickness=0.5,
+                             color=colors.HexColor("#d5d8dc")))
+
+    # 4 ── Source rows ─────────────────────────────────────────────────────
+    if not matched_refs:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(
+            "No matches found.",
+            _new_ps(NR, fontSize=8.5,
+                     textColor=colors.HexColor("#27ae60"), leftIndent=10)))
+    else:
+        BADGE_W = 0.62*cm
+        PCT_W   = 0.82*cm
+        ARR_W   = 0.28*cm
+        NAME_W  = RW - BADGE_W - PCT_W - ARR_W
+
+        for r in matched_refs:
+            si  = src_idx[r["reference"]]
+            fg  = _pfg(si)
+            st  = r["_st"]
+
+            fname = r["reference"]
+            if len(fname) > 23:
+                fname = fname[:20] + "…"
+
+            # Percentage cell: always show display_pct (avg of non-zero types)
+            pct_cell = [
+                Paragraph(f"<b>{st['display_pct']}%</b>",
+                          _new_ps(NR, fontSize=9, fontName="Helvetica-Bold",
+                                   textColor=colors.HexColor("#2c3e50"),
+                                   alignment=TA_RIGHT, leading=11)),
+            ]
+            if st["single_type"]:
+                pct_cell.append(
+                    Paragraph(st["display_type_label"],
+                              _new_ps(NR, fontSize=5.5,
+                                       textColor=colors.HexColor("#95a5a6"),
+                                       alignment=TA_RIGHT, leading=7)))
+
+            src_row = Table([[
+                Paragraph(f"<b>{si + 1}</b>",
+                          _new_ps(NR, fontSize=8, fontName="Helvetica-Bold",
+                                   textColor=colors.white,
+                                   alignment=TA_CENTER, leading=10)),
+                [Paragraph(fname,
+                           _new_ps(NR, fontSize=7.5, fontName="Helvetica-Bold",
+                                    textColor=fg, leading=10, spaceAfter=1)),
+                 Paragraph(st["type_label"],
+                           _new_ps(NR, fontSize=6.5,
+                                    textColor=colors.HexColor("#95a5a6"),
+                                    leading=8)),
+                 Paragraph(st["breakdown_label"],
+                           _new_ps(NR, fontSize=5.5,
+                                    textColor=colors.HexColor("#aab7b8"),
+                                    leading=7))],
+                pct_cell,
+                Paragraph("<b>&gt;</b>",
+                          _new_ps(NR, fontSize=9,
+                                   textColor=colors.HexColor("#bdc3c7"),
+                                   alignment=TA_CENTER, leading=10)),
+            ]], colWidths=[BADGE_W, NAME_W, PCT_W, ARR_W])
+
+            src_row.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0), (0,0),   fg),
+                ("BACKGROUND",    (1,0), (-1,0),  colors.white),
+                ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+                ("TOPPADDING",    (0,0), (-1,-1), 7),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+                ("LEFTPADDING",   (0,0), (0,0),   0),
+                ("LEFTPADDING",   (1,0), (1,0),   8),
+                ("LEFTPADDING",   (2,0), (-1,0),  2),
+                ("RIGHTPADDING",  (0,0), (-1,-1), 4),
+                ("LINEBELOW",     (0,0), (-1,-1), 0.5,
+                 colors.HexColor("#ecf0f1")),
+            ]))
+            story.append(src_row)
+
+    # =========================================================
+    # SUMMARY ANALYSIS PAGE (full-width, at end of document)
+    # =========================================================
+    story.append(NextPageTemplate("Summary"))
+    story.append(PageBreak())
+
+    # ── Section title ─────────────────────────────────────────────────────
+    story.append(Paragraph(
+        "<b>Summary Analysis</b>",
+        _new_ps(NR, fontSize=14, fontName="Helvetica-Bold",
+                 textColor=colors.HexColor("#1a252f"),
+                 spaceAfter=4, leading=18)))
+    story.append(Paragraph(
+        f"Document: <b>{os.path.basename(user_pdf_path)}</b>  ·  "
+        f"Total uncited chunks analysed: <b>{uncited_total}</b>  ·  "
+        f"Match Overview: <b>{ov_top}%</b>",
+        _new_ps(NR, fontSize=8, textColor=colors.HexColor("#7f8c8d"),
+                 spaceAfter=10, leading=11)))
+    story.append(HRFlowable(width=SUM_W, thickness=1.0,
+                             color=colors.HexColor("#c0392b")))
+    story.append(Spacer(1, 10))
+
+    # ── Overall type breakdown ────────────────────────────────────────────
+    story.append(Paragraph(
+        "<b>Overall Match Breakdown (across all reference PDFs)</b>",
+        _new_ps(NR, fontSize=9, fontName="Helvetica-Bold",
+                 textColor=colors.HexColor("#2c3e50"), spaceAfter=6, leading=12)))
+
+    OV_COL = SUM_W / 3
+    ov_table = Table([[
+        Paragraph(
+            f"<b>{ov_d}%</b><br/><font size='7' color='#7f8c8d'>Direct Match</font>",
+            _new_ps(NR, fontSize=22, fontName="Helvetica-Bold",
+                     textColor=colors.HexColor("#1a6a8a"),
+                     alignment=TA_CENTER, leading=26)),
+        Paragraph(
+            f"<b>{ov_p}%</b><br/><font size='7' color='#7f8c8d'>Paraphrasing</font>",
+            _new_ps(NR, fontSize=22, fontName="Helvetica-Bold",
+                     textColor=colors.HexColor("#c0622b"),
+                     alignment=TA_CENTER, leading=26)),
+        Paragraph(
+            f"<b>{ov_se}%</b><br/><font size='7' color='#7f8c8d'>Semantic Similarity</font>",
+            _new_ps(NR, fontSize=22, fontName="Helvetica-Bold",
+                     textColor=colors.HexColor("#2e7d32"),
+                     alignment=TA_CENTER, leading=26)),
+    ]], colWidths=[OV_COL, OV_COL, OV_COL])
+    ov_table.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (0,0), colors.HexColor("#d4eaf5")),
+        ("BACKGROUND",    (1,0), (1,0), colors.HexColor("#fbe8da")),
+        ("BACKGROUND",    (2,0), (2,0), colors.HexColor("#dcedc8")),
+        ("TOPPADDING",    (0,0), (-1,-1), 14),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 14),
+        ("LEFTPADDING",   (0,0), (-1,-1), 8),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 8),
+        ("ALIGN",         (0,0), (-1,-1), "CENTER"),
+        ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+        ("INNERGRID",     (0,0), (-1,-1), 0.5, colors.white),
+        ("BOX",           (0,0), (-1,-1), 0.5, colors.HexColor("#d5d8dc")),
+    ]))
+    story.append(ov_table)
+    story.append(Spacer(1, 16))
+
+    # ── Per-reference breakdown table ─────────────────────────────────────
+    story.append(Paragraph(
+        "<b>Per-Reference PDF Breakdown</b>",
+        _new_ps(NR, fontSize=9, fontName="Helvetica-Bold",
+                 textColor=colors.HexColor("#2c3e50"), spaceAfter=6, leading=12)))
+
+    _SUM_LEGEND = (
+        "Display % = average of non-zero match types  ·  "
+        "<font color='#1a6a8a'><b>Dir</b></font> = Direct Match  ·  "
+        "<font color='#c0622b'><b>Par</b></font> = Paraphrasing  ·  "
+        "<font color='#2e7d32'><b>Sem</b></font> = Semantic Similarity"
+    )
+    story.append(Paragraph(_SUM_LEGEND,
+                           _new_ps(NR, fontSize=6.5,
+                                    textColor=colors.HexColor("#95a5a6"),
+                                    spaceAfter=5, leading=9)))
+
+    if not matched_refs:
+        story.append(Paragraph(
+            "No plagiarism matches were detected.",
+            _new_ps(NR, fontSize=9, textColor=colors.HexColor("#27ae60"), leading=13)))
+    else:
+        # Table header
+        _C0 = 0.55 * cm   # badge
+        _C1 = SUM_W - _C0 - 2.4*cm - 2.4*cm - 2.4*cm - 2.0*cm
+        _C2 = 2.4 * cm    # display %
+        _C3 = 2.4 * cm    # direct
+        _C4 = 2.4 * cm    # paraphrase
+        _C5 = 2.0 * cm    # semantic
+
+        def _hdr_p(txt, col):
+            return Paragraph(f"<b>{txt}</b>",
+                             _new_ps(NR, fontSize=7, fontName="Helvetica-Bold",
+                                      textColor=col, alignment=TA_CENTER, leading=9))
+
+        def _val_p(val, col):
+            txt = f"{val}%" if val > 0 else "—"
+            c   = col if val > 0 else colors.HexColor("#bdc3c7")
+            return Paragraph(txt,
+                             _new_ps(NR, fontSize=8, textColor=c,
+                                      alignment=TA_CENTER, leading=10))
+
+        sum_hdr = Table([[
+            Paragraph("", _new_ps(NR, fontSize=1)),
+            Paragraph("<b>Reference PDF</b>",
+                      _new_ps(NR, fontSize=7, fontName="Helvetica-Bold",
+                               textColor=colors.HexColor("#2c3e50"), leading=9)),
+            _hdr_p("Display %", colors.HexColor("#2c3e50")),
+            _hdr_p("Direct",    colors.HexColor("#1a6a8a")),
+            _hdr_p("Paraphrase",colors.HexColor("#c0622b")),
+            _hdr_p("Semantic",  colors.HexColor("#2e7d32")),
+        ]], colWidths=[_C0, _C1, _C2, _C3, _C4, _C5])
+        sum_hdr.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), colors.HexColor("#ecf0f1")),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ("LEFTPADDING",   (0,0), (0,0),   0),
+            ("LEFTPADDING",   (1,0), (1,0),   8),
+            ("LINEBELOW",     (0,0), (-1,-1), 0.5, colors.HexColor("#bdc3c7")),
+        ]))
+        story.append(sum_hdr)
+
+        for r in matched_refs:
+            si = src_idx[r["reference"]]
+            fg = _pfg(si)
+            bg = _pbg(si)
+            st = r["_st"]
+
+            fname = r["reference"]
+            if len(fname) > 40:
+                fname = fname[:38] + "…"
+
+            sum_row = Table([[
+                Paragraph(f"<b>{si+1}</b>",
+                          _new_ps(NR, fontSize=7, fontName="Helvetica-Bold",
+                                   textColor=colors.white,
+                                   alignment=TA_CENTER, leading=9)),
+                [Paragraph(fname,
+                           _new_ps(NR, fontSize=8, textColor=fg,
+                                    fontName="Helvetica-Bold", leading=10)),
+                 Paragraph(st["breakdown_label"],
+                           _new_ps(NR, fontSize=6,
+                                    textColor=colors.HexColor("#aab7b8"),
+                                    leading=8))],
+                Paragraph(f"<b>{st['display_pct']}%</b>",
+                          _new_ps(NR, fontSize=9, fontName="Helvetica-Bold",
+                                   textColor=colors.HexColor("#2c3e50"),
+                                   alignment=TA_CENTER, leading=11)),
+                _val_p(st["direct"],    colors.HexColor("#1a6a8a")),
+                _val_p(st["paraphrase"],colors.HexColor("#c0622b")),
+                _val_p(st["semantic"],  colors.HexColor("#2e7d32")),
+            ]], colWidths=[_C0, _C1, _C2, _C3, _C4, _C5])
+
+            sum_row.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0), (0,0),   fg),
+                ("BACKGROUND",    (1,0), (-1,0),  colors.white),
+                ("BACKGROUND",    (2,0), (2,0),   bg),
+                ("TOPPADDING",    (0,0), (-1,-1), 5),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+                ("LEFTPADDING",   (0,0), (0,0),   0),
+                ("LEFTPADDING",   (1,0), (1,0),   8),
+                ("LEFTPADDING",   (2,0), (-1,0),  4),
+                ("ALIGN",         (2,0), (-1,0),  "CENTER"),
+                ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
+                ("LINEBELOW",     (0,0), (-1,-1), 0.3, colors.HexColor("#ecf0f1")),
+            ]))
+            story.append(sum_row)
+
+        story.append(Spacer(1, 14))
+
+        # ── Category legend at the very bottom ────────────────────────────
+        story.append(HRFlowable(width=SUM_W, thickness=0.5,
+                                 color=colors.HexColor("#d5d8dc")))
+        story.append(Spacer(1, 6))
+        cat_legend = Table([[
+            Paragraph(
+                "<font color='#1a6a8a'><b>■ Direct Match</b></font>  "
+                "Verbatim or near-verbatim text copied from the reference.",
+                _new_ps(NR, fontSize=6.5, leading=9)),
+            Paragraph(
+                "<font color='#c0622b'><b>■ Paraphrasing</b></font>  "
+                "Same meaning expressed in different words.",
+                _new_ps(NR, fontSize=6.5, leading=9)),
+            Paragraph(
+                "<font color='#2e7d32'><b>■ Semantic Similarity</b></font>  "
+                "Related concepts with similar context.",
+                _new_ps(NR, fontSize=6.5, leading=9)),
+        ]], colWidths=[SUM_W*0.34, SUM_W*0.33, SUM_W*0.33])
+        cat_legend.setStyle(TableStyle([
+            ("TOPPADDING",    (0,0), (-1,-1), 0),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 0),
+            ("LEFTPADDING",   (0,0), (-1,-1), 4),
+            ("VALIGN",        (0,0), (-1,-1), "TOP"),
+        ]))
+        story.append(cat_legend)
+
+    doc.build(story)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def run_engine(username, role, uploaded_pdf_path):
+    os.makedirs(REFERENCE_DIR, exist_ok=True)
+    reference_pdfs = [
+        os.path.join(REFERENCE_DIR, f)
+        for f in sorted(os.listdir(REFERENCE_DIR))
+        if f.lower().endswith(".pdf")
+    ]
+    if not reference_pdfs:
+        raise ValueError(
+            "No reference PDFs found. Ask your admin to upload reference documents first."
+        )
+    out_dir     = os.path.join(RESULT_ROOT, username)
+    os.makedirs(out_dir, exist_ok=True)
+    base        = os.path.splitext(os.path.basename(uploaded_pdf_path))[0]
+    output_path = os.path.join(out_dir, base + "_report.pdf")
+
+    results, details, user_chunks, uncited_mask = check_plagiarism(
+        uploaded_pdf_path, reference_pdfs)
+
+    _build_report(
+        user_pdf_path = uploaded_pdf_path,
+        results       = results,
+        details       = details,
+        user_chunks   = user_chunks,
+        uncited_mask  = uncited_mask,
+        output_path   = output_path,
+    )
+    save_result(username, role, uploaded_pdf_path, output_path, results)
+    return output_path, results, details

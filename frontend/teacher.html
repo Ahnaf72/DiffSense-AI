@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Teacher Dashboard</title>
+  <style>
+    /* Offline status badge */
+    .offline-badge {
+      position: fixed; top: 10px; right: 10px;
+      padding: 8px 16px; border-radius: 6px;
+      font-size: 12px; font-weight: 600; z-index: 9999; display: none;
+    }
+    .offline-badge.offline { background: #10b981; color: white; display: block; }
+    .offline-badge.degraded { background: #f59e0b; color: white; display: block; }
+    .degraded-banner {
+      background: #fef3c7; border-left: 4px solid #f59e0b;
+      padding: 12px 16px; margin: 16px; display: none;
+    }
+    .degraded-banner.active { display: block; }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      font-family: 'Segoe UI', sans-serif
+    }
+
+    body {
+      display: flex;
+      background: #f0fdf4;
+      height: 100vh;
+      overflow: hidden
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 240px;
+      background: #065f46;
+      color: #fff;
+      padding: 20px;
+      flex-shrink: 0
+    }
+
+    .sidebar h2 {
+      margin-bottom: 30px;
+      font-size: 1.1rem
+    }
+
+    .sidebar button {
+      width: 100%;
+      padding: 11px 12px;
+      margin-bottom: 10px;
+      background: #a7f3d0;
+      border: none;
+      color: #064e3b;
+      text-align: left;
+      cursor: pointer;
+      border-radius: 8px;
+      transition: .2s;
+      font-size: .9rem;
+      font-weight: 600
+    }
+
+    .sidebar button:hover {
+      background: #047857;
+      color: #fff
+    }
+
+    /* ── Main ── */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden
+    }
+
+    .topbar {
+      background: #fff;
+      padding: 14px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, .07)
+    }
+
+    .logout-btn {
+      background: #10b981;
+      color: #fff;
+      border: none;
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: .85rem
+    }
+
+    .logout-btn:hover {
+      background: #059669
+    }
+
+    /* ── Content ── */
+    .content {
+      flex: 1;
+      padding: 28px;
+      overflow-y: auto
+    }
+
+    .stats {
+      display: flex;
+      gap: 18px;
+      margin-bottom: 28px;
+      flex-wrap: wrap
+    }
+
+    .stat-card {
+      background: #fff;
+      flex: 1;
+      min-width: 160px;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, .06);
+      border-left: 5px solid #10b981;
+      cursor: pointer
+    }
+
+    .stat-card h4 {
+      color: #6b7280;
+      margin-bottom: 8px;
+      font-size: .85rem
+    }
+
+    .stat-card p {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: #065f46
+    }
+
+    .card {
+      background: #fff;
+      padding: 24px;
+      border-radius: 10px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, .06)
+    }
+
+    .section {
+      display: none
+    }
+
+    input[type=file],
+    input[type=password],
+    input[type=text] {
+      width: 100%;
+      padding: 10px;
+      margin-bottom: 10px;
+      border: 1px solid #d1fae5;
+      border-radius: 6px;
+      font-size: .9rem
+    }
+
+    .primary-btn {
+      background: #10b981;
+      color: #fff;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: .9rem
+    }
+
+    .primary-btn:hover {
+      background: #059669
+    }
+
+    ul {
+      list-style: none;
+      margin-top: 10px
+    }
+
+    li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      border: 1px solid #d1fae5;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      background: #f8fffe;
+      font-size: .88rem
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 8px;
+      align-items: center
+    }
+
+    .btn-check {
+      background: #10b981;
+      color: #fff;
+      border: none;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: .8rem
+    }
+
+    .btn-check:hover {
+      background: #059669
+    }
+
+    .btn-check:disabled {
+      background: #6ee7b7;
+      cursor: not-allowed
+    }
+    .btn-download {
+  background: #7c3aed;
+  color: #fff;
+  border: none;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: .8rem
+}
+.btn-download:hover { background: #6d28d9 }
+
+    .btn-delete {
+      background: none;
+      border: none;
+      color: #dc2626;
+      cursor: pointer;
+      font-size: 1rem
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: .85rem
+    }
+
+    th {
+      background: #065f46;
+      color: #fff;
+      padding: 8px 12px;
+      text-align: left
+    }
+
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #d1fae5
+    }
+
+    tr:hover td {
+      background: #f0fdf4
+    }
+
+    .sim-high {
+      color: #dc2626;
+      font-weight: 700
+    }
+
+    .sim-mid {
+      color: #ea580c;
+      font-weight: 700
+    }
+
+    .sim-low {
+      color: #ca8a04;
+      font-weight: 700
+    }
+
+    .sim-orig {
+      color: #16a34a;
+      font-weight: 700
+    }
+
+    .link-btn {
+      color: #059669;
+      text-decoration: underline;
+      cursor: pointer;
+      font-size: .8rem
+    }
+
+    .spinner {
+      display: none;
+      width: 14px;
+      height: 14px;
+      border: 2px solid #fff;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+      margin-left: 6px
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg)
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Offline status badge -->
+  <div id="offlineBadge" class="offline-badge">
+    <span id="badgeText">Checking...</span>
+  </div>
+  <div id="degradedBanner" class="degraded-banner">
+    <strong>System Running in Keyword-Only Mode</strong>
+    <p style="margin-top: 4px; font-size: 14px;">
+      Semantic and paraphrase detection unavailable. Only exact word matches will be detected.
+    </p>
+  </div>
+
+  <div class="sidebar">
+    <h2>🧑‍🏫 Teacher Panel</h2>
+    <button onclick="showHome()">🏠 Home</button>
+    <button onclick="showSection('upload')">📄 Upload PDFs</button>
+    <button onclick="showMyUploads()">📁 My Uploads</button>
+    <button onclick="showMyResults()">📊 My Results</button>
+    <button onclick="showSection('password')">🔐 Change Password</button>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <h3>Dashboard</h3>
+      <button class="logout-btn" onclick="logout()">Logout</button>
+    </div>
+
+    <div class="content">
+
+      <div id="homeCards" class="stats">
+        <div class="stat-card" onclick="showMyUploads()">
+          <h4>My Uploads</h4>
+          <p id="uploadCount">0</p>
+        </div>
+        <div class="stat-card" onclick="showMyResults()">
+          <h4>Results Ready</h4>
+          <p id="resultCount">0</p>
+        </div>
+      </div>
+
+      <!-- ── Upload ── -->
+      <div id="upload" class="section card">
+        <h3 style="margin-bottom:14px">Upload Multiple PDFs</h3>
+        <input type="file" id="teacherFiles" multiple accept=".pdf" />
+        <button class="primary-btn" onclick="uploadPDFs()">Upload</button>
+      </div>
+
+      <!-- ── My Uploads ── -->
+      <div id="myUploads" class="section card">
+        <h3 style="margin-bottom:14px">My Uploaded Files</h3>
+        <ul id="uploadList"></ul>
+      </div>
+
+      <!-- ── Results ── -->
+      <div id="myResults" class="section card">
+        <h3 style="margin-bottom:14px">My Comparison Results</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Compared Against</th>
+              <th>Similarity</th>
+              <th>Date</th>
+              <th>Report</th>
+            </tr>
+          </thead>
+          <tbody id="resultTable"></tbody>
+        </table>
+      </div>
+
+      <!-- ── Change Password ── -->
+      <div id="password" class="section card">
+        <h3 style="margin-bottom:14px">Change Password</h3>
+        <input type="password" id="currentPassword" placeholder="Current Password" />
+        <input type="password" id="newPassword" placeholder="New Password" />
+        <button class="primary-btn" onclick="changePassword()">Update</button>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const BASE = "http://127.0.0.1:8000";
+    const token = () => localStorage.getItem("token");
+    const headers = () => ({ "Authorization": "Bearer " + token() });
+
+    function showSection(id) {
+      document.getElementById("homeCards").style.display = "none";
+      document.querySelectorAll(".section").forEach(s => s.style.display = "none");
+      document.getElementById(id).style.display = "block";
+    }
+    function showHome() {
+      document.querySelectorAll(".section").forEach(s => s.style.display = "none");
+      document.getElementById("homeCards").style.display = "flex";
+    }
+    function showMyUploads() { showSection("myUploads"); loadUploads(); }
+    function showMyResults() { showSection("myResults"); loadResults(); }
+    function logout() { localStorage.clear(); window.location.href = "index.html"; }
+
+    // ── Upload PDFs ──────────────────────────────────────────────
+    async function uploadPDFs() {
+      const fi = document.getElementById("teacherFiles");
+      if (!fi.files.length) { alert("Select at least one PDF"); return; }
+
+      const fd = new FormData();
+      Array.from(fi.files).forEach(f => fd.append("files", f));
+
+      const res = await fetch(`${BASE}/upload_teacher_pdf`, {
+        method: "POST", headers: headers(), body: fd
+      });
+      const data = await res.json();
+      alert(data.message || data.detail);
+      fi.value = "";
+      loadUploads();
+    }
+
+    // ── Load Uploads ─────────────────────────────────────────────
+    async function loadUploads() {
+      const res = await fetch(`${BASE}/my/uploads`, { headers: headers() });
+      const data = await res.json();
+      const list = document.getElementById("uploadList");
+      list.innerHTML = "";
+      document.getElementById("uploadCount").textContent = data.files.length;
+
+      if (!data.files.length) {
+        list.innerHTML = "<li style='color:#9ca3af'>No uploads yet.</li>";
+        return;
+      }
+      data.files.forEach(f => {
+        const li = document.createElement("li");
+
+        const btn = document.createElement("button");
+        btn.className = "btn-check";
+        btn.innerHTML = `Check <span class="spinner"></span>`;
+        btn.onclick = () => runCheck(f, btn);
+
+        const del = document.createElement("button");
+        del.className = "btn-delete";
+        del.textContent = "❌";
+        del.onclick = () => deletePDF(f);
+
+        const grp = document.createElement("div");
+        grp.className = "btn-group";
+        grp.appendChild(btn);
+        grp.appendChild(del);
+
+        li.innerHTML = `<span>📄 ${f}</span>`;
+        li.appendChild(grp);
+        list.appendChild(li);
+      });
+    }
+
+    // ── Run Check ────────────────────────────────────────────────
+    async function runCheck(filename, btn) {
+      btn.disabled = true;
+      btn.querySelector(".spinner").style.display = "inline-block";
+
+      try {
+        const res = await fetch(`${BASE}/run_check`, {
+          method: "POST",
+          headers: { ...headers(), "Content-Type": "application/json" },
+          body: JSON.stringify({ filename }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) { alert("Error: " + (data.detail || "Unknown error")); return; }
+
+        const resultFilename = data.result_url.split("/").pop();
+
+        const existingDl = btn.parentElement.querySelector(".btn-download");
+        if (existingDl) existingDl.remove();
+
+        const dlBtn = document.createElement("button");
+        dlBtn.className = "btn-download";
+        dlBtn.textContent = "⬇ Report";
+        dlBtn.onclick = () => downloadReport(resultFilename);
+        btn.parentElement.insertBefore(dlBtn, btn.nextSibling);
+
+        alert(
+          `✅ Check complete!\nOverall similarity: ${data.overall_similarity}%\n\nClick ⬇ Report to download.`
+        );
+        loadResults();
+      } catch (e) {
+        alert("Failed: " + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.querySelector(".spinner").style.display = "none";
+      }
+    }
+
+    // ── Delete ───────────────────────────────────────────────────
+    async function deletePDF(filename) {
+      if (!confirm(`Delete ${filename}?`)) return;
+      const res = await fetch(
+        `${BASE}/upload_teacher_pdf/delete/${encodeURIComponent(filename)}`,
+        { method: "DELETE", headers: headers() }
+      );
+      const data = await res.json();
+      alert(data.message || data.detail);
+      loadUploads();
+    }
+
+    // ── Load Results ─────────────────────────────────────────────
+    async function loadResults() {
+      const res = await fetch(`${BASE}/my/results`, { headers: headers() });
+      const data = await res.json();
+      const rows = data.results || [];
+      document.getElementById("resultCount").textContent = rows.length;
+
+      const tbody = document.getElementById("resultTable");
+      tbody.innerHTML = "";
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="5" style="color:#9ca3af;text-align:center">No results yet.</td></tr>`;
+        return;
+      }
+
+      rows.forEach(r => {
+        const sim = parseFloat(r.similarity || 0);
+        let cls = "sim-orig";
+        if (sim > 70) cls = "sim-high";
+        else if (sim > 40) cls = "sim-mid";
+        else if (sim > 20) cls = "sim-low";
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+      <td>${r.student_pdf.split("/").pop()}</td>
+      <td>${r.reference_pdf}</td>
+      <td class="${cls}">${sim.toFixed(1)}%</td>
+      <td>${r.created_at || "—"}</td>
+      <td>
+        <span class="link-btn"
+          onclick="downloadReport('${r.result_pdf.split('/').pop()}')">
+          ⬇ Download
+        </span>
+      </td>
+    `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // ── Change Password ──────────────────────────────────────────
+    async function changePassword() {
+      const cur = document.getElementById("currentPassword").value;
+      const nw = document.getElementById("newPassword").value;
+      if (!cur || !nw) { alert("Fill in both fields"); return; }
+
+      const fd = new FormData();
+      fd.append("current_password", cur);
+      fd.append("new_password", nw);
+
+      const res = await fetch(`${BASE}/admin/change-password`, {
+        method: "POST", headers: headers(), body: fd
+      });
+      const data = await res.json();
+      alert(data.message || data.detail);
+    }
+// ── Download Report ──────────────────────────────────────────
+async function downloadReport(resultFilename) {
+  try {
+    const res = await fetch(
+      `${BASE}/download_report/${localStorage.getItem("username")}/${resultFilename}`,
+      { headers: headers() }
+    );
+    if (!res.ok) { alert("Download failed"); return; }
+    const blob    = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a       = document.createElement("a");
+    a.href        = blobUrl;
+    a.download    = resultFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(blobUrl);
+  } catch (e) {
+    alert("Download error: " + e.message);
+  }
+}
+    // ── Check system status for offline badge ──────────────────────
+    async function checkSystemStatus() {
+      try {
+        const res = await fetch('http://127.0.0.1:8000/api/system/status');
+        const status = await res.json();
+        const badge = document.getElementById('offlineBadge');
+        const badgeText = document.getElementById('badgeText');
+        const banner = document.getElementById('degradedBanner');
+        if (status.offline_mode && !status.degraded) {
+          badge.classList.add('offline');
+          badgeText.textContent = 'Offline Mode';
+        } else if (status.degraded) {
+          badge.classList.add('degraded');
+          badgeText.textContent = 'Degraded Mode';
+          banner.classList.add('active');
+        }
+      } catch (err) {
+        console.log('Status check failed:', err);
+      }
+    }
+
+    // ── Init ─────────────────────────────────────────────────────
+    checkSystemStatus();
+    loadUploads();
+  </script>
+</body>
+
+</html>
